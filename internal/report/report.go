@@ -631,13 +631,7 @@ h3{color:var(--text2);font-size:16px;margin:20px 0 8px 0;}
 </div>
 </div>
 
-<div class="card">
-<h2>👥 Team Contribution Map</h2>
-<div class="table-wrap"><table class="team-table">
-<thead><tr><th>Developer</th><th>Files Modified</th><th>Commits</th><th>First Change</th><th>Last Change</th><th>Top-3 Microservices</th></tr></thead>
-<tbody>%s</tbody>
-</table></div>
-</div>
+%s
 
 <div class="card">
 <h2>📚 Tech Stack</h2>
@@ -713,8 +707,19 @@ g.d3Force('charge').strength(-350);g.d3Force('link').distance(120);
 		protoCard,
 		grpcCard,
 		foreignLangCards,
-		// Team
-		teamRows.String(),
+		// Team (only if git data exists)
+		func() string {
+			if len(teamEntries) == 0 {
+				return ""
+			}
+			return fmt.Sprintf(`<div class="card">
+<h2>👥 Team Contribution Map</h2>
+<div class="table-wrap"><table class="team-table">
+<thead><tr><th>Developer</th><th>Files Modified</th><th>Commits</th><th>First Change</th><th>Last Change</th><th>Top-3 Microservices</th></tr></thead>
+<tbody>%s</tbody>
+</table></div>
+</div>`, teamRows.String())
+		}(),
 		// Tech Stack
 		techTags,
 		totalMSCount,
