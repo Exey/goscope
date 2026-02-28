@@ -12,6 +12,7 @@ import (
 	gitpkg "github.com/goscope/internal/git"
 	"github.com/goscope/internal/graph"
 	"github.com/goscope/internal/parser"
+	"github.com/goscope/internal/scanner"
 )
 
 type MicroserviceSummary struct {
@@ -72,7 +73,6 @@ type gData struct {
 	Links []gLink `json:"links"`
 }
 
-// Generate creates the HTML report.
 func Generate(
 	g *graph.DependencyGraph,
 	outputPath string,
@@ -83,6 +83,7 @@ func Generate(
 	technologies []string,
 	dockerServices []string,
 	rootSubdirs []string,
+	foreignServices []scanner.ForeignService,
 ) error {
 	fmt.Println("   Generating HTML sections...")
 
@@ -127,6 +128,25 @@ func Generate(
 		}
 	}
 
+	// Foreign language stats
+	foreignLangLines := make(map[string]int) // language -> total lines
+	for _, fs := range foreignServices {
+		foreignLangLines[fs.Language] += fs.LineCount
+	}
+	var foreignLangCards string
+	type langStat struct {
+		Lang  string
+		Lines int
+	}
+	var ls []langStat
+	for l, n := range foreignLangLines {
+		ls = append(ls, langStat{l, n})
+	}
+	sort.Slice(ls, func(i, j int) bool { return ls[i].Lines > ls[j].Lines })
+	for _, l := range ls {
+		foreignLangCards += fmt.Sprintf(`<div class="summary-card"><div class="num">%s</div><div class="label">%s lines</div></div>`, fmtNum(l.Lines), esc(l.Lang))
+	}
+
 	// ─── Microservices ───
 	msFiles := make(map[string][]*parser.ParsedFile)
 	for _, f := range files {
@@ -153,6 +173,8 @@ func Generate(
 		}
 		return microservices[i].TotalLines > microservices[j].TotalLines
 	})
+
+	totalMSCount := len(microservices) + len(foreignServices)
 
 	// ─── 1. Team ───
 	type authorEntry struct {
@@ -192,7 +214,7 @@ func Generate(
 		))
 	}
 
-	// ─── 2. Stack: Technologies ───
+	// ─── 2. Tech Stack: Technologies ───
 	techSet := make(map[string]bool)
 	for _, t := range technologies {
 		techSet[t] = true
@@ -207,22 +229,35 @@ func Generate(
 		techSet["Protocol Buffers"] = true
 		techSet["gRPC"] = true
 	}
+	// Add foreign languages as technologies
+	for _, fs := range foreignServices {
+		techSet[fs.Language] = true
+	}
 	var techList []string
 	for t := range techSet {
 		techList = append(techList, t)
 	}
 	sort.Strings(techList)
 
+	// Tech tags with language badge for non-infra techs
+	foreignLangs := make(map[string]bool)
+	for _, fs := range foreignServices {
+		foreignLangs[fs.Language] = true
+	}
 	var techTags string
 	for _, t := range techList {
-		techTags += fmt.Sprintf("<span class='tag tag-tech'>%s</span> ", esc(t))
+		cls := "tag-tech"
+		if foreignLangs[t] {
+			cls = "tag-foreign"
+		}
+		techTags += fmt.Sprintf("<span class='tag %s'>%s</span> ", cls, esc(t))
 	}
 
-	// ─── 2b. Architecture graph (all microservices + technologies) ───
-	archGraph := buildArchitectureGraph(microservices, techList, files)
+	// ─── 2b. Architecture graph ───
+	archGraph := buildArchitectureGraph(microservices, techList, files, foreignServices)
 	archGraphJSON, _ := json.Marshal(archGraph)
 
-	// ─── 2c. Stack: Microservices grid ───
+	// ─── 2c. Microservices grid ───
 	var msGridHTML strings.Builder
 	for _, ms := range microservices {
 		anchor := strings.ReplaceAll(ms.Name, " ", "-")
@@ -238,14 +273,21 @@ func Generate(
 			anchor, icon, esc(ms.Name), badge,
 		))
 	}
+	// Foreign services in the grid
+	for _, fs := range foreignServices {
+		badge := fmt.Sprintf("%s loc · %s", fmtNum(fs.LineCount), esc(fs.Language))
+		msGridHTML.WriteString(fmt.Sprintf(
+			"<span class='tag tag-foreign pkg-link'><span class='pkg-name'>🌐 %s</span><span class='bs-badge-right'>%s</span></span>\n",
+			esc(fs.Name), badge,
+		))
+	}
 
-	// ─── 3. Microservices Penetration ───
-	// Microservices penetration: which MS is imported by the most other MSes
+	// ─── 3. Microservices penetration ───
 	allMSNames := make(map[string]bool)
 	for _, ms := range microservices {
 		allMSNames[ms.Name] = true
 	}
-	msImportedBy := make(map[string]map[string]bool) // target-ms -> set of source-ms
+	msImportedBy := make(map[string]map[string]bool)
 	for _, f := range files {
 		srcMS := f.MicroserviceName
 		if srcMS == "" {
@@ -353,13 +395,13 @@ func Generate(
 			statsParts = append(statsParts, fmt.Sprintf("🟡 %d enums", ms.EnumCount))
 		}
 		if ms.FuncCount > 0 {
-			statsParts = append(statsParts, fmt.Sprintf("⚡ %d funcs", ms.FuncCount))
+			statsParts = append(statsParts, fmt.Sprintf("🟠 %d funcs", ms.FuncCount))
 		}
 		if ms.MessageCount > 0 {
 			statsParts = append(statsParts, fmt.Sprintf("📨 %d messages", ms.MessageCount))
 		}
 		if ms.ServiceCount > 0 {
-			statsParts = append(statsParts, fmt.Sprintf("📡 %d services", ms.ServiceCount))
+			statsParts = append(statsParts, fmt.Sprintf("🔴 %d services", ms.ServiceCount))
 		}
 		if ms.RPCCount > 0 {
 			statsParts = append(statsParts, fmt.Sprintf("🔗 %d RPCs", ms.RPCCount))
@@ -423,7 +465,7 @@ func Generate(
 		if showG {
 			msGraphScripts.WriteString(fmt.Sprintf(`{
 const d=%s;const el=document.getElementById('%s');
-if(d.nodes.length>0&&el){const kc={'struct':'#34c759','interface':'#007aff','message':'#ff9500','service':'#ff3b30','enum':'#af52de'};
+if(d.nodes.length>0&&el){const kc={'struct':'#34c759','interface':'#007aff','message':'#ff9500','service':'#ff3b30','enum':'#af52de','func':'#ff9500'};
 const g=ForceGraph()(el).graphData(d).nodeLabel(n=>n.label+' ('+n.sublabel+')\n'+n.kind).nodeVal(n=>Math.max(n.score*3000,5)).nodeColor(n=>kc[n.kind]||'#999')
 .nodeCanvasObject((node,ctx,gs)=>{const r=Math.max(Math.sqrt(Math.max(node.score*3000,5))*0.8,3);ctx.beginPath();ctx.arc(node.x,node.y,r,0,2*Math.PI);ctx.fillStyle=kc[node.kind]||'#999';ctx.fill();if(gs>0.5){ctx.font=(Math.max(10/gs,3))+'px -apple-system,sans-serif';ctx.textAlign='center';ctx.fillStyle='#333';ctx.fillText(node.label,node.x,node.y+r+10/gs);}})
 .linkDirectionalArrowLength(8).linkDirectionalArrowRelPos(1).linkColor(()=>'rgba(0,0,0,0.12)').width(el.offsetWidth).height(420);
@@ -458,7 +500,6 @@ g.d3Force('charge').strength(-250);g.d3Force('link').distance(80);}}
 		funcRows.WriteString(fmt.Sprintf("<tr><td><code>%s()</code></td><td class='mono'>%d</td><td>%s</td><td><a href='#ms-%s' class='pkg-link-inline'>%s</a></td></tr>\n", esc(fn.Name), fn.LineCount, esc(fname), a, esc(ms)))
 	}
 
-	// ─── Subdirs display ───
 	subdirDisplay := ""
 	if len(rootSubdirs) > 0 {
 		subdirDisplay = " · <span style='color:var(--text3);font-size:12px'>" + esc(strings.Join(rootSubdirs, " / ")) + "</span>"
@@ -506,6 +547,7 @@ h3{color:var(--text2);font-size:16px;margin:20px 0 8px 0;}
 .mono{font-family:'SF Mono',Menlo,monospace;font-size:13px;}
 .tag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:500;margin:2px;}
 .tag-tech{background:#e8f5e9;color:#2e7d32;}
+.tag-foreign{background:#fff3e0;color:#e65100;}
 .tag-local{background:#e3f2fd;color:#1565c0;}
 .tag-cloud{line-height:2.2;}
 .pkg-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:4px 8px;}
@@ -516,9 +558,6 @@ h3{color:var(--text2);font-size:16px;margin:20px 0 8px 0;}
 .bs-badge-right{background:rgba(0,0,0,0.07);color:var(--text3);font-size:9px;padding:1px 5px;border-radius:4px;margin-left:auto;padding-left:6px;flex-shrink:0;font-weight:400;}
 .bs-badge{background:rgba(0,0,0,0.08);color:var(--text3);font-size:10px;padding:1px 5px;border-radius:4px;margin-left:2px;font-weight:400;}
 .count{font-weight:400;color:var(--text3);}
-.hotspot-list{list-style:none;padding:0;margin:0;}
-.hotspot-item{padding:10px 0;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:flex-start;}
-.hotspot-score{font-weight:600;color:var(--red);font-family:'SF Mono',monospace;font-size:13px;white-space:nowrap;}
 .package-section{margin-bottom:32px;padding-bottom:24px;border-bottom:1px solid var(--border);}
 .package-section:last-child{border-bottom:none;}
 .pkg-stats{font-weight:400;color:var(--text3);font-size:13px;margin-left:8px;}
@@ -548,10 +587,11 @@ h3{color:var(--text2);font-size:16px;margin:20px 0 8px 0;}
     <div class="summary-card"><div class="num">%d</div><div class="label">🟢 Structs</div></div>
     <div class="summary-card"><div class="num">%d</div><div class="label">🔵 Interfaces</div></div>
     <div class="summary-card"><div class="num">%d</div><div class="label">🟡 Enums</div></div>
-    <div class="summary-card"><div class="num">%d</div><div class="label">⚡ Functions</div></div>
+    <div class="summary-card"><div class="num">%d</div><div class="label">🟠 Functions</div></div>
     <div class="summary-card"><div class="num">%d</div><div class="label">📨 Messages</div></div>
-    <div class="summary-card"><div class="num">%d</div><div class="label">📡 Services</div></div>
+    <div class="summary-card"><div class="num">%d</div><div class="label">🔴 Services</div></div>
     <div class="summary-card"><div class="num">%d</div><div class="label">🔗 RPCs</div></div>
+    %s
 </div>
 </div>
 
@@ -564,13 +604,12 @@ h3{color:var(--text2);font-size:16px;margin:20px 0 8px 0;}
 </div>
 
 <div class="card">
-<h2>📚 Stack</h2>
+<h2>📚 Tech Stack</h2>
 <h3>Technologies</h3>
 <div class="tag-cloud">%s</div>
 <h3 style="margin-top:20px">Microservices <span class="count">(%d)</span></h3>
 <div class="pkg-grid">%s</div>
 <h3 style="margin-top:24px">Architecture</h3>
-<p class="subtitle" style="margin-bottom:8px">Microservices and the technologies they depend on.</p>
 <div id="arch-graph" class="arch-graph-container"></div>
 </div>
 
@@ -585,7 +624,7 @@ h3{color:var(--text2);font-size:16px;margin:20px 0 8px 0;}
 
 <div class="card">
 <h2>🔧 Microservices</h2>
-<p class="subtitle">Graphs: type references. <span style="color:#34c759">●</span> struct <span style="color:#007aff">●</span> interface <span style="color:#ff9500">●</span> message <span style="color:#ff3b30">●</span> service <span style="color:#af52de">●</span> enum</p>
+<p class="subtitle">Graphs: type references + big functions. <span style="color:#34c759">●</span> struct <span style="color:#007aff">●</span> interface <span style="color:#ff9500">●</span> message/func <span style="color:#ff3b30">●</span> service <span style="color:#af52de">●</span> enum</p>
 %s
 </div>
 
@@ -598,18 +637,18 @@ h3{color:var(--text2);font-size:16px;margin:20px 0 8px 0;}
 const d=%s;
 const el=document.getElementById('arch-graph');
 if(d.nodes.length>0&&el){
-const kc={'microservice':'#007aff','technology':'#34c759'};
+const kc={'microservice':'#007aff','technology':'#34c759','foreign':'#ff9500'};
 const g=ForceGraph()(el).graphData(d)
 .nodeLabel(n=>n.label+'\n'+n.kind)
-.nodeVal(n=>n.kind==='microservice'?8:5)
+.nodeVal(n=>n.kind==='microservice'||n.kind==='foreign'?10:5)
 .nodeColor(n=>kc[n.kind]||'#999')
 .nodeCanvasObject((node,ctx,gs)=>{
-const r=node.kind==='microservice'?6:4;
+const r=node.kind==='technology'?5:7;
 ctx.beginPath();ctx.arc(node.x,node.y,r,0,2*Math.PI);
 ctx.fillStyle=kc[node.kind]||'#999';ctx.fill();
 if(gs>0.3){
 ctx.font=(Math.max(10/gs,3))+'px -apple-system,sans-serif';
-ctx.textAlign='center';ctx.fillStyle=node.kind==='microservice'?'#1d1d1f':'#666';
+ctx.textAlign='center';ctx.fillStyle=node.kind==='technology'?'#666':'#1d1d1f';
 ctx.fillText(node.label,node.x,node.y+r+12/gs);}})
 .linkColor(()=>'rgba(0,0,0,0.08)')
 .linkWidth(1.5)
@@ -626,8 +665,8 @@ g.d3Force('charge').strength(-350);g.d3Force('link').distance(120);
 		time.Now().Format("2006-01-02 15:04:05"),
 		esc(branchName),
 		subdirDisplay,
-		// Summary cards — MICROSERVICES first
-		len(microservices),
+		// Summary cards
+		totalMSCount,
 		totalGoFiles,
 		protoCard,
 		fmtNum(totalLines),
@@ -635,13 +674,14 @@ g.d3Force('charge').strength(-350);g.d3Force('link').distance(120);
 		todoCard,
 		totalStructs, totalInterfaces, totalEnums, totalFuncs,
 		totalMessages, totalServices, totalRPCs,
+		foreignLangCards,
 		// Team
 		teamRows.String(),
-		// Stack
+		// Tech Stack
 		techTags,
-		len(microservices),
+		totalMSCount,
 		msGridHTML.String(),
-		// Insights - penetration
+		// Penetration
 		func() string {
 			if len(penList) == 0 {
 				return ""
@@ -690,9 +730,8 @@ g.d3Force('charge').strength(-350);g.d3Force('link').distance(120);
 	return nil
 }
 
-// buildArchitectureGraph builds a graph with all microservices + technologies they use.
-func buildArchitectureGraph(microservices []*MicroserviceSummary, techList []string, files []*parser.ParsedFile) gData {
-	// Collect which technologies each MS uses
+// buildArchitectureGraph builds a graph with all microservices + technologies.
+func buildArchitectureGraph(microservices []*MicroserviceSummary, techList []string, files []*parser.ParsedFile, foreignServices []scanner.ForeignService) gData {
 	msTechs := make(map[string]map[string]bool)
 	for _, f := range files {
 		if f.MicroserviceName == "" {
@@ -714,14 +753,9 @@ func buildArchitectureGraph(microservices []*MicroserviceSummary, techList []str
 		}
 	}
 
-	// Build nodes — all microservices
 	var nodes []gNode
-	msLineMap := make(map[string]int)
-	for _, ms := range microservices {
-		msLineMap[ms.Name] = ms.TotalLines
-	}
-
 	usedTechs := make(map[string]bool)
+
 	for _, ms := range microservices {
 		score := float64(ms.TotalLines) / 1000.0
 		nodes = append(nodes, gNode{
@@ -732,9 +766,17 @@ func buildArchitectureGraph(microservices []*MicroserviceSummary, techList []str
 			usedTechs[t] = true
 		}
 	}
-	// Only show technologies actually used by major microservices
+	// Foreign services
+	for _, fs := range foreignServices {
+		nodes = append(nodes, gNode{
+			ID: "ms:" + fs.Name, Label: fs.Name, Sublabel: fs.Language,
+			Kind: "foreign", Score: float64(fs.LineCount) / 1000.0, Group: "foreign",
+		})
+		usedTechs[fs.Language] = true
+	}
+
 	for _, t := range techList {
-		if usedTechs[t] && t != "Go" { // Skip "Go" as it's universal
+		if usedTechs[t] && t != "Go" {
 			nodes = append(nodes, gNode{
 				ID: "tech:" + t, Label: t, Sublabel: "technology",
 				Kind: "technology", Score: 3, Group: "tech",
@@ -742,7 +784,6 @@ func buildArchitectureGraph(microservices []*MicroserviceSummary, techList []str
 		}
 	}
 
-	// Build links: ms -> tech
 	var links []gLink
 	for _, ms := range microservices {
 		for t := range msTechs[ms.Name] {
@@ -751,10 +792,14 @@ func buildArchitectureGraph(microservices []*MicroserviceSummary, techList []str
 			}
 		}
 	}
+	for _, fs := range foreignServices {
+		links = append(links, gLink{Source: "ms:" + fs.Name, Target: "tech:" + fs.Language})
+	}
 
 	return gData{Nodes: nodes, Links: links}
 }
 
+// buildDeclGraph builds the per-microservice declaration graph, including big functions.
 func buildDeclGraph(ms *MicroserviceSummary, scores map[string]float64) gData {
 	gk := map[parser.DeclKind]bool{
 		parser.DeclStruct: true, parser.DeclInterface: true,
@@ -770,6 +815,10 @@ func buildDeclGraph(ms *MicroserviceSummary, scores map[string]float64) gData {
 			if gk[d.Kind] && len(d.Name) >= 3 {
 				ad = append(ad, di{d.Name, f.FilePath, f.FileName(), d.Kind})
 			}
+		}
+		// Add big functions (>=50 lines) to the graph
+		for _, bf := range f.BigFunctions {
+			ad = append(ad, di{bf.Name, bf.FilePath, f.FileName(), parser.DeclFunc})
 		}
 	}
 	if len(ad) > 80 {
@@ -788,19 +837,15 @@ func buildDeclGraph(ms *MicroserviceSummary, scores map[string]float64) gData {
 		nodeScores[nid] = s
 	}
 
-	// ── Smart edge building ──
-	// Instead of naive strings.Contains, use Go-aware type-reference matching:
-	// match "TypeName" only when preceded by *, [], space/tab/newline/( and followed
-	// by non-identifier char. Skip very short names (≤4 chars) to avoid false positives.
 	type candidate struct {
-		target    string
-		tgtScore  float64
+		target   string
+		tgtScore float64
 	}
-	outgoing := make(map[string][]candidate) // src node ID -> candidates
+	outgoing := make(map[string][]candidate)
 	seen := make(map[string]bool)
 
 	for _, src := range ad {
-		if src.kind != parser.DeclStruct && src.kind != parser.DeclInterface {
+		if src.kind != parser.DeclStruct && src.kind != parser.DeclInterface && src.kind != parser.DeclFunc {
 			continue
 		}
 		content, err := os.ReadFile(src.fp)
@@ -811,10 +856,9 @@ func buildDeclGraph(ms *MicroserviceSummary, scores map[string]float64) gData {
 		srcID := src.fp + "::" + src.name
 
 		for _, tgt := range ad {
-			if tgt.name == src.name || tgt.fp == src.fp && tgt.name == src.name {
+			if tgt.name == src.name {
 				continue
 			}
-			// Skip very short names — they match too broadly
 			if len(tgt.name) <= 4 {
 				continue
 			}
@@ -822,10 +866,6 @@ func buildDeclGraph(ms *MicroserviceSummary, scores map[string]float64) gData {
 			if seen[ek] {
 				continue
 			}
-			// Go-aware matching: look for the type name as a standalone identifier
-			// used in struct fields, function params, or variable declarations.
-			// Match patterns: *TypeName, []TypeName, TypeName{, TypeName), :TypeName,
-			// or after whitespace/tab/newline.
 			if matchGoTypeRef(cs, tgt.name) {
 				tgtID := tgt.fp + "::" + tgt.name
 				outgoing[srcID] = append(outgoing[srcID], candidate{tgtID, nodeScores[tgtID]})
@@ -834,7 +874,6 @@ func buildDeclGraph(ms *MicroserviceSummary, scores map[string]float64) gData {
 		}
 	}
 
-	// Cap outgoing edges per node: keep top 5 by target score
 	maxOutPerNode := 5
 	var links []gLink
 	for srcID, cands := range outgoing {
@@ -848,7 +887,6 @@ func buildDeclGraph(ms *MicroserviceSummary, scores map[string]float64) gData {
 		}
 	}
 
-	// Global cap: max 3 edges per node for readability
 	maxEdges := len(nodes) * 3
 	if maxEdges < 10 {
 		maxEdges = 10
@@ -860,28 +898,19 @@ func buildDeclGraph(ms *MicroserviceSummary, scores map[string]float64) gData {
 	return gData{Nodes: nodes, Links: links}
 }
 
-// matchGoTypeRef checks if typeName appears as a Go type reference in source code,
-// not just as a substring. It looks for the name preceded by a type-usage context
-// character (*, [, space, tab, newline, (, comma) and followed by a non-identifier char.
 func matchGoTypeRef(source, typeName string) bool {
 	tl := len(typeName)
 	sl := len(source)
 	for i := 0; i <= sl-tl; i++ {
-		// Check if typeName matches at position i
 		if source[i:i+tl] != typeName {
 			continue
 		}
-		// Check preceding character: must be a type-context char
-		if i > 0 {
-			prev := source[i-1]
-			if isIdentChar(prev) {
-				continue // part of a longer identifier like "MyReport" matching "Report"
-			}
+		if i > 0 && isIdentChar(source[i-1]) {
+			continue
 		}
-		// Check following character: must NOT be an identifier char
 		after := i + tl
 		if after < sl && isIdentChar(source[after]) {
-			continue // part of "ReportService" matching "Report"
+			continue
 		}
 		return true
 	}
@@ -968,11 +997,11 @@ func kindIcon(k parser.DeclKind) string {
 	case parser.DeclInterface:
 		return "🔵"
 	case parser.DeclFunc:
-		return "⚡"
+		return "🟠"
 	case parser.DeclMessage:
 		return "📨"
 	case parser.DeclService:
-		return "📡"
+		return "🔴"
 	case parser.DeclRPC:
 		return "🔗"
 	case parser.DeclEnum:

@@ -53,6 +53,7 @@ type ParsedFile struct {
 	TodoCount       int          `json:"todoCount"`
 	FixmeCount      int          `json:"fixmeCount"`
 	LongestFunction *FunctionInfo `json:"longestFunction,omitempty"`
+	BigFunctions    []FunctionInfo `json:"bigFunctions,omitempty"` // functions >= 50 lines
 	FileType        string       `json:"fileType"` // "go" or "proto"
 }
 

@@ -10,15 +10,65 @@ import (
 	"github.com/goscope/internal/config"
 )
 
-// ScanResult holds the scanned files grouped by microservice.
-type ScanResult struct {
-	Files         []string            // all file paths
-	Microservices map[string][]string // microservice name -> file paths
-	RootSubdirs   []string            // first-level subdirectories of the root
-	GitRepos      []string            // paths to directories containing .git
+// ForeignService represents a non-Go microservice detected in the repo tree.
+type ForeignService struct {
+	Name      string
+	Language  string // "Python", "Java", "C#", etc.
+	Path      string
+	LineCount int
+	FileCount int
 }
 
-// Scan walks the directory tree looking for Go/proto files.
+// ScanResult holds the scanned files grouped by microservice.
+type ScanResult struct {
+	Files           []string            // all Go/proto file paths
+	Microservices   map[string][]string // microservice name -> Go/proto file paths
+	RootSubdirs     []string            // first-level subdirectories of the root
+	GitRepos        []string            // paths to directories containing .git
+	ForeignServices []ForeignService    // non-Go services detected
+	ServicesRoot    string              // detected services root dir (e.g. "src", "services", or "")
+}
+
+// serviceContainerDirs are directory names that typically hold microservices inside them.
+var serviceContainerDirs = map[string]bool{
+	"src": true, "services": true, "service": true, "apps": true,
+	"microservices": true, "svc": true, "cmd": true, "modules": true,
+	"components": true, "backend": true, "packages": true, "deploy": false,
+	"projects": true, "server": true, "servers": true,
+}
+
+// serviceMarkers are files/dirs that signal a directory is a microservice.
+var serviceMarkers = []string{
+	"Dockerfile", "go.mod", "main.go", "package.json", "requirements.txt",
+	"setup.py", "pyproject.toml", "pom.xml", "build.gradle", "build.gradle.kts",
+	"Cargo.toml", "composer.json", "Gemfile", "mix.exs", "CMakeLists.txt",
+	"Makefile", ".csproj", "Program.cs",
+}
+
+// langExtensions maps file extensions to programming languages.
+var langExtensions = map[string]string{
+	".py":    "Python",
+	".java":  "Java",
+	".kt":    "Kotlin",
+	".scala": "Scala",
+	".php":   "PHP",
+	".rb":    "Ruby",
+	".rs":    "Rust",
+	".cs":    "C#",
+	".ts":    "TypeScript",
+	".js":    "JavaScript",
+	".c":     "C",
+	".cpp":   "C++",
+	".cc":    "C++",
+	".h":     "C/C++ Header",
+	".hpp":   "C++",
+	".ex":    "Elixir",
+	".exs":   "Elixir",
+	".swift": "Swift",
+	".dart":  "Dart",
+}
+
+// Scan walks the directory tree looking for Go/proto files and foreign services.
 func Scan(rootPath string, cfg config.Config) (*ScanResult, error) {
 	rootPath, err := filepath.Abs(rootPath)
 	if err != nil {
@@ -43,6 +93,14 @@ func Scan(rootPath string, cfg config.Config) (*ScanResult, error) {
 
 	result := &ScanResult{Microservices: make(map[string][]string)}
 
+	// ── Phase 1: Discover service directories (up to 3 levels deep) ──
+	serviceDirs := discoverServiceDirs(rootPath, excludeSet)
+
+	// Determine services root for CLI output
+	if len(serviceDirs) > 0 {
+		result.ServicesRoot = detectServicesRoot(rootPath, serviceDirs)
+	}
+
 	// Collect root-level subdirs and find .git repos
 	entries, _ := os.ReadDir(rootPath)
 	for _, e := range entries {
@@ -56,10 +114,39 @@ func Scan(rootPath string, cfg config.Config) (*ScanResult, error) {
 	}
 	sort.Strings(result.RootSubdirs)
 
+	// Also check for .git in discovered service dirs (e.g. src/<service>/.git)
+	for _, sd := range serviceDirs {
+		gitDir := filepath.Join(sd, ".git")
+		if _, err := os.Stat(gitDir); err == nil {
+			alreadyHave := false
+			for _, r := range result.GitRepos {
+				if r == sd {
+					alreadyHave = true
+					break
+				}
+			}
+			if !alreadyHave {
+				result.GitRepos = append(result.GitRepos, sd)
+			}
+		}
+	}
+
 	// Also check root-level .git
 	if _, err := os.Stat(filepath.Join(rootPath, ".git")); err == nil {
-		result.GitRepos = append([]string{rootPath}, result.GitRepos...)
+		hasRoot := false
+		for _, r := range result.GitRepos {
+			if r == rootPath {
+				hasRoot = true
+				break
+			}
+		}
+		if !hasRoot {
+			result.GitRepos = append([]string{rootPath}, result.GitRepos...)
+		}
 	}
+
+	// ── Phase 2: Walk and collect Go/proto files + detect foreign services ──
+	foreignStats := make(map[string]*ForeignService) // service dir path -> stats
 
 	err = filepath.WalkDir(rootPath, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -75,28 +162,189 @@ func Scan(rootPath string, cfg config.Config) (*ScanResult, error) {
 		if d.IsDir() {
 			return nil
 		}
+
 		ext := strings.ToLower(filepath.Ext(name))
-		if !extSet[ext] {
+
+		// Go/proto files
+		if extSet[ext] {
+			result.Files = append(result.Files, path)
+			ms := detectMicroservice(rootPath, path, serviceDirs)
+			result.Microservices[ms] = append(result.Microservices[ms], path)
 			return nil
 		}
-		result.Files = append(result.Files, path)
-		ms := detectMicroservice(rootPath, path)
-		result.Microservices[ms] = append(result.Microservices[ms], path)
+
+		// Foreign language files — count lines per service dir
+		if lang, ok := langExtensions[ext]; ok {
+			svcDir := findServiceDir(rootPath, path, serviceDirs)
+			if svcDir == "" {
+				return nil
+			}
+			svcName := filepath.Base(svcDir)
+			key := svcDir
+			fs, exists := foreignStats[key]
+			if !exists {
+				fs = &ForeignService{Name: svcName, Language: lang, Path: svcDir}
+				foreignStats[key] = fs
+			}
+			fs.FileCount++
+			lc := countFileLines(path)
+			fs.LineCount += lc
+		}
+
 		return nil
 	})
+
+	// Filter foreign services: only keep dirs that have NO Go files (pure foreign)
+	for key, fs := range foreignStats {
+		if _, hasGo := result.Microservices[fs.Name]; hasGo {
+			continue // This service has Go files, skip as foreign
+		}
+		// Also skip if very few files (probably not a real service)
+		if fs.FileCount < 2 {
+			continue
+		}
+		_ = key
+		result.ForeignServices = append(result.ForeignServices, *fs)
+	}
+	sort.Slice(result.ForeignServices, func(i, j int) bool {
+		return result.ForeignServices[i].LineCount > result.ForeignServices[j].LineCount
+	})
+
+	// ── Phase 3: Filter out microservices with no real content ──
+	for ms, files := range result.Microservices {
+		if ms == "root" && len(files) <= 1 {
+			// Keep root only if it has real files
+			continue
+		}
+		// Keep all detected microservices that have files
+	}
+
 	return result, err
 }
 
+// discoverServiceDirs finds directories that look like microservices.
+// Searches up to 3 levels deep from root.
+func discoverServiceDirs(rootPath string, excludeSet map[string]bool) []string {
+	var dirs []string
+
+	// Level 1: direct children
+	l1, _ := os.ReadDir(rootPath)
+	for _, e := range l1 {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") || excludeSet[e.Name()] {
+			continue
+		}
+		l1Path := filepath.Join(rootPath, e.Name())
+
+		if isServiceDir(l1Path) {
+			dirs = append(dirs, l1Path)
+			continue
+		}
+
+		// Level 2: if l1 is a service container, check children
+		if serviceContainerDirs[strings.ToLower(e.Name())] {
+			l2, _ := os.ReadDir(l1Path)
+			for _, e2 := range l2 {
+				if !e2.IsDir() || strings.HasPrefix(e2.Name(), ".") || excludeSet[e2.Name()] {
+					continue
+				}
+				l2Path := filepath.Join(l1Path, e2.Name())
+				if isServiceDir(l2Path) {
+					dirs = append(dirs, l2Path)
+				}
+			}
+			continue
+		}
+
+		// Level 2: check children for service containers
+		l2, _ := os.ReadDir(l1Path)
+		for _, e2 := range l2 {
+			if !e2.IsDir() || strings.HasPrefix(e2.Name(), ".") || excludeSet[e2.Name()] {
+				continue
+			}
+			l2Path := filepath.Join(l1Path, e2.Name())
+
+			if serviceContainerDirs[strings.ToLower(e2.Name())] {
+				// Level 3: children of the container
+				l3, _ := os.ReadDir(l2Path)
+				for _, e3 := range l3 {
+					if !e3.IsDir() || strings.HasPrefix(e3.Name(), ".") || excludeSet[e3.Name()] {
+						continue
+					}
+					l3Path := filepath.Join(l2Path, e3.Name())
+					if isServiceDir(l3Path) {
+						dirs = append(dirs, l3Path)
+					}
+				}
+			}
+		}
+	}
+
+	return dirs
+}
+
+// isServiceDir checks if a directory looks like a microservice.
+func isServiceDir(dir string) bool {
+	for _, marker := range serviceMarkers {
+		// Check both exact file and glob pattern (.csproj)
+		if strings.HasPrefix(marker, ".") {
+			// Glob for *.csproj etc
+			matches, _ := filepath.Glob(filepath.Join(dir, "*"+marker))
+			if len(matches) > 0 {
+				return true
+			}
+		} else {
+			if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {
+				return true
+			}
+		}
+	}
+	// Check for .git
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+		return true
+	}
+	return false
+}
+
+// detectServicesRoot finds the common parent directory pattern for services.
+func detectServicesRoot(rootPath string, serviceDirs []string) string {
+	parents := make(map[string]int)
+	for _, sd := range serviceDirs {
+		rel, _ := filepath.Rel(rootPath, sd)
+		parts := strings.Split(rel, string(filepath.Separator))
+		if len(parts) >= 2 {
+			parents[parts[0]]++
+		}
+	}
+	best := ""
+	bestCount := 0
+	for p, c := range parents {
+		if c > bestCount {
+			best = p
+			bestCount = c
+		}
+	}
+	if bestCount >= 2 {
+		return best
+	}
+	return ""
+}
+
 // detectMicroservice infers the microservice name from the file path.
-// For a multi-repo layout the first-level directory IS the microservice.
-func detectMicroservice(rootPath, filePath string) string {
+func detectMicroservice(rootPath, filePath string, serviceDirs []string) string {
+	// Check if file belongs to a discovered service dir
+	for _, sd := range serviceDirs {
+		if strings.HasPrefix(filePath, sd+string(filepath.Separator)) || filePath == sd {
+			return filepath.Base(sd)
+		}
+	}
+
 	rel, _ := filepath.Rel(rootPath, filePath)
 	parts := strings.Split(rel, string(filepath.Separator))
 	if len(parts) < 2 {
 		return "root"
 	}
 
-	// Multi-repo: first-level dir with .git / go.mod / Dockerfile is a repo
+	// Multi-repo: first-level dir with markers is a repo
 	firstDir := filepath.Join(rootPath, parts[0])
 	for _, marker := range []string{".git", "go.mod", "Dockerfile", "Makefile", "docker-compose.yml"} {
 		if _, err := os.Stat(filepath.Join(firstDir, marker)); err == nil {
@@ -109,9 +357,9 @@ func detectMicroservice(rootPath, filePath string) string {
 			return parts[i+1]
 		}
 	}
-	servicesDirs := map[string]bool{"services": true, "service": true, "apps": true, "microservices": true, "svc": true}
+	knownContainers := map[string]bool{"services": true, "service": true, "apps": true, "microservices": true, "svc": true}
 	for i, p := range parts {
-		if servicesDirs[p] && i+1 < len(parts) {
+		if knownContainers[p] && i+1 < len(parts) {
 			return parts[i+1]
 		}
 	}
@@ -126,6 +374,30 @@ func detectMicroservice(rootPath, filePath string) string {
 		}
 	}
 	return parts[0]
+}
+
+// findServiceDir finds which service directory a file belongs to.
+func findServiceDir(rootPath, filePath string, serviceDirs []string) string {
+	for _, sd := range serviceDirs {
+		if strings.HasPrefix(filePath, sd+string(filepath.Separator)) {
+			return sd
+		}
+	}
+	return ""
+}
+
+func countFileLines(path string) int {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	n := 0
+	s := bufio.NewScanner(f)
+	for s.Scan() {
+		n++
+	}
+	return n
 }
 
 // ScanDockerCompose reads docker-compose.yml from root and all subdirs.

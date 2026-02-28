@@ -40,6 +40,7 @@ func ParseGoFile(filePath, microservice string) (*ParsedFile, error) {
 	// Longest function tracking
 	var (
 		bestFunc     *FunctionInfo
+		bigFuncs     []FunctionInfo
 		curFuncName  string
 		funcStart    int
 		braceDepth   int
@@ -119,6 +120,13 @@ func ParseGoFile(filePath, microservice string) (*ParsedFile, error) {
 						FilePath:  filePath,
 					}
 				}
+				if length >= 50 {
+					bigFuncs = append(bigFuncs, FunctionInfo{
+						Name:      curFuncName,
+						LineCount: length,
+						FilePath:  filePath,
+					})
+				}
 				inFunc = false
 				curFuncName = ""
 			}
@@ -152,6 +160,7 @@ func ParseGoFile(filePath, microservice string) (*ParsedFile, error) {
 		TodoCount:        todoCount,
 		FixmeCount:       fixmeCount,
 		LongestFunction:  bestFunc,
+		BigFunctions:     bigFuncs,
 		FileType:         "go",
 	}, nil
 }

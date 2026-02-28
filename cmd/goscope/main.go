@@ -38,7 +38,6 @@ func main() {
 	case "--help", "-h":
 		printHelp()
 	default:
-		// Treat everything as: goscope [path] [--open] [--verbose]
 		path, verbose, open := parseAnalyzeArgs(os.Args[1:])
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
 			runAnalyze(path, verbose, open)
@@ -50,7 +49,6 @@ func main() {
 	}
 }
 
-// parseAnalyzeArgs extracts path, --verbose, --open from args in any order.
 func parseAnalyzeArgs(args []string) (path string, verbose, open bool) {
 	path = "."
 	for _, arg := range args {
@@ -77,6 +75,7 @@ Usage:
   goscope init                    Create default .goscope.json config
 
 Path should point to the parent folder where all backend repos are cloned.
+Services are auto-detected at up to 3 levels deep (e.g. src/<service>/).
 
 Flags:
   --verbose    Enable verbose logging
@@ -118,7 +117,7 @@ func runAnalyze(path string, verbose, openBrowser bool) {
 		fmt.Printf("❌ Scan failed: %v\n", err)
 		os.Exit(1)
 	}
-	if len(scanResult.Files) == 0 {
+	if len(scanResult.Files) == 0 && len(scanResult.ForeignServices) == 0 {
 		fmt.Println("❌ No source files found.")
 		os.Exit(1)
 	}
@@ -126,15 +125,25 @@ func runAnalyze(path string, verbose, openBrowser bool) {
 		fmt.Printf("❌ Too many files (%d). Limit: %d\n", len(scanResult.Files), cfg.MaxFilesAnalyze)
 		os.Exit(1)
 	}
-	fmt.Printf("   Found %d files across %d microservices\n", len(scanResult.Files), len(scanResult.Microservices))
+	fmt.Printf("   Found %d Go/proto files across %d microservices\n", len(scanResult.Files), len(scanResult.Microservices))
+	if scanResult.ServicesRoot != "" {
+		fmt.Printf("   📁 Services root: %s/\n", scanResult.ServicesRoot)
+	}
 	if len(scanResult.RootSubdirs) > 0 {
 		fmt.Printf("   📁 Root subdirs: %s\n", joinStr(scanResult.RootSubdirs))
 	}
 	if len(scanResult.GitRepos) > 0 {
 		fmt.Printf("   🔀 Git repos found: %d\n", len(scanResult.GitRepos))
 	}
+	if len(scanResult.ForeignServices) > 0 {
+		var fNames []string
+		for _, fs := range scanResult.ForeignServices {
+			fNames = append(fNames, fmt.Sprintf("%s (%s)", fs.Name, fs.Language))
+		}
+		fmt.Printf("   🌐 Non-Go services: %s\n", joinStr(fNames))
+	}
 
-	// Detect technologies from docker-compose + go.mod + Makefile
+	// Detect technologies
 	dockerServices, technologies := scanner.ScanDockerCompose(absPath)
 	if len(technologies) > 0 {
 		fmt.Printf("   🐳 Technologies detected: %s\n", joinStr(technologies))
@@ -235,7 +244,8 @@ func runAnalyze(path string, verbose, openBrowser bool) {
 
 	projectName := filepath.Base(absPath)
 	if err := report.Generate(g, reportPath, parsedFiles, branchName, authorStats,
-		projectName, technologies, dockerServices, scanResult.RootSubdirs); err != nil {
+		projectName, technologies, dockerServices, scanResult.RootSubdirs,
+		scanResult.ForeignServices); err != nil {
 		fmt.Printf("❌ Report generation failed: %v\n", err)
 		os.Exit(1)
 	}
