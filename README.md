@@ -27,7 +27,7 @@ Where `~/backend` is the **parent folder** where all your backend service reposi
 
 Services are auto-detected up to 3 levels deep, so layouts like `src/<service>/` or `services/<service>/` also work. Non-Go services (Python, Java, PHP, etc.) are detected and shown in the report with language badges.
 
-[![goscope.png](https://i.postimg.cc/TTfttRWk/goscope.png)] 
+![Result](https://i.postimg.cc/TTfttRWk/goscope.png)
 
 ---
 
