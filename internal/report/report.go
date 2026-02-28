@@ -1,0 +1,921 @@
+package report
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	gitpkg "github.com/goscope/internal/git"
+	"github.com/goscope/internal/graph"
+	"github.com/goscope/internal/parser"
+)
+
+type MicroserviceSummary struct {
+	Name           string
+	Files          []*parser.ParsedFile
+	TotalLines     int
+	Declarations   []parser.Declaration
+	StructCount    int
+	InterfaceCount int
+	FuncCount      int
+	MessageCount   int
+	ServiceCount   int
+	RPCCount       int
+	EnumCount      int
+}
+
+func newMS(name string, files []*parser.ParsedFile) *MicroserviceSummary {
+	ms := &MicroserviceSummary{Name: name, Files: files}
+	for _, f := range files {
+		ms.TotalLines += f.LineCount
+		for _, d := range f.Declarations {
+			ms.Declarations = append(ms.Declarations, d)
+			switch d.Kind {
+			case parser.DeclStruct:
+				ms.StructCount++
+			case parser.DeclInterface:
+				ms.InterfaceCount++
+			case parser.DeclFunc:
+				ms.FuncCount++
+			case parser.DeclMessage:
+				ms.MessageCount++
+			case parser.DeclService:
+				ms.ServiceCount++
+			case parser.DeclRPC:
+				ms.RPCCount++
+			case parser.DeclEnum:
+				ms.EnumCount++
+			}
+		}
+	}
+	return ms
+}
+
+type gNode struct {
+	ID       string  `json:"id"`
+	Label    string  `json:"label"`
+	Sublabel string  `json:"sublabel"`
+	Kind     string  `json:"kind"`
+	Score    float64 `json:"score"`
+	Group    string  `json:"group"`
+}
+type gLink struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+}
+type gData struct {
+	Nodes []gNode `json:"nodes"`
+	Links []gLink `json:"links"`
+}
+
+// Generate creates the HTML report.
+func Generate(
+	g *graph.DependencyGraph,
+	outputPath string,
+	files []*parser.ParsedFile,
+	branchName string,
+	authorStats map[string]*gitpkg.AuthorStats,
+	projectName string,
+	technologies []string,
+	dockerServices []string,
+	rootSubdirs []string,
+) error {
+	fmt.Println("   Generating HTML sections...")
+
+	fileMap := make(map[string]*parser.ParsedFile)
+	for _, f := range files {
+		fileMap[f.FilePath] = f
+	}
+	dateFmt := "2006-01-02"
+
+	// ─── Stats ───
+	var totalLines, totalGoFiles, totalProtoFiles int
+	var totalStructs, totalInterfaces, totalFuncs int
+	var totalMessages, totalServices, totalRPCs, totalEnums int
+	var totalTodos, totalFixmes int
+
+	for _, f := range files {
+		totalLines += f.LineCount
+		if f.FileType == "go" {
+			totalGoFiles++
+		} else if f.FileType == "proto" {
+			totalProtoFiles++
+		}
+		totalTodos += f.TodoCount
+		totalFixmes += f.FixmeCount
+		for _, d := range f.Declarations {
+			switch d.Kind {
+			case parser.DeclStruct:
+				totalStructs++
+			case parser.DeclInterface:
+				totalInterfaces++
+			case parser.DeclFunc:
+				totalFuncs++
+			case parser.DeclMessage:
+				totalMessages++
+			case parser.DeclService:
+				totalServices++
+			case parser.DeclRPC:
+				totalRPCs++
+			case parser.DeclEnum:
+				totalEnums++
+			}
+		}
+	}
+
+	// ─── Microservices ───
+	msFiles := make(map[string][]*parser.ParsedFile)
+	for _, f := range files {
+		ms := f.MicroserviceName
+		if ms == "" {
+			ms = "root"
+		}
+		msFiles[ms] = append(msFiles[ms], f)
+	}
+	var microservices []*MicroserviceSummary
+	for name, mf := range msFiles {
+		microservices = append(microservices, newMS(name, mf))
+	}
+	sort.Slice(microservices, func(i, j int) bool {
+		iGW := isAPIGateway(microservices[i].Name)
+		jGW := isAPIGateway(microservices[j].Name)
+		if iGW != jGW {
+			return iGW
+		}
+		iP := isProtoMS(microservices[i].Name)
+		jP := isProtoMS(microservices[j].Name)
+		if iP != jP {
+			return iP
+		}
+		return microservices[i].TotalLines > microservices[j].TotalLines
+	})
+
+	// ─── 1. Team ───
+	type authorEntry struct {
+		Name  string
+		Stats *gitpkg.AuthorStats
+	}
+	var teamEntries []authorEntry
+	for name, stats := range authorStats {
+		teamEntries = append(teamEntries, authorEntry{name, stats})
+	}
+	sort.Slice(teamEntries, func(i, j int) bool {
+		return teamEntries[i].Stats.FilesModified > teamEntries[j].Stats.FilesModified
+	})
+	if len(teamEntries) > 30 {
+		teamEntries = teamEntries[:30]
+	}
+
+	var teamRows strings.Builder
+	for _, ae := range teamEntries {
+		first := "—"
+		if ae.Stats.FirstCommit > 0 {
+			first = time.Unix(int64(ae.Stats.FirstCommit), 0).Format(dateFmt)
+		}
+		last := "—"
+		if ae.Stats.LastCommit > 0 {
+			last = time.Unix(int64(ae.Stats.LastCommit), 0).Format(dateFmt)
+		}
+		top3ms := topNKeys(ae.Stats.MicroserviceCounts, 3)
+		var top3html string
+		for _, ms := range top3ms {
+			anchor := strings.ReplaceAll(ms, " ", "-")
+			top3html += fmt.Sprintf("<a href='#ms-%s' class='tag tag-local pkg-link-inline' style='font-size:11px'>%s</a> ", anchor, esc(ms))
+		}
+		teamRows.WriteString(fmt.Sprintf(
+			"<tr><td>%s</td><td>%d</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td></tr>\n",
+			esc(ae.Name), ae.Stats.FilesModified, ae.Stats.TotalCommits, first, last, top3html,
+		))
+	}
+
+	// ─── 2. Stack: Technologies ───
+	techSet := make(map[string]bool)
+	for _, t := range technologies {
+		techSet[t] = true
+	}
+	techSet["Go"] = true
+	for _, f := range files {
+		for _, imp := range f.Imports {
+			detectTechFromImport(imp, techSet)
+		}
+	}
+	if totalProtoFiles > 0 {
+		techSet["Protocol Buffers"] = true
+		techSet["gRPC"] = true
+	}
+	var techList []string
+	for t := range techSet {
+		techList = append(techList, t)
+	}
+	sort.Strings(techList)
+
+	var techTags string
+	for _, t := range techList {
+		techTags += fmt.Sprintf("<span class='tag tag-tech'>%s</span> ", esc(t))
+	}
+
+	// ─── 2b. Architecture graph (all microservices + technologies) ───
+	archGraph := buildArchitectureGraph(microservices, techList, files)
+	archGraphJSON, _ := json.Marshal(archGraph)
+
+	// ─── 2c. Stack: Microservices grid ───
+	var msGridHTML strings.Builder
+	for _, ms := range microservices {
+		anchor := strings.ReplaceAll(ms.Name, " ", "-")
+		badge := fmt.Sprintf("%s loc", fmtNum(ms.TotalLines))
+		icon := "🔧"
+		if isAPIGateway(ms.Name) {
+			icon = "🌐"
+		} else if isProtoMS(ms.Name) {
+			icon = "📡"
+		}
+		msGridHTML.WriteString(fmt.Sprintf(
+			"<a href='#ms-%s' class='tag tag-local pkg-link'><span class='pkg-name'>%s %s</span><span class='bs-badge-right'>%s</span></a>\n",
+			anchor, icon, esc(ms.Name), badge,
+		))
+	}
+
+	// ─── 3. Microservices Penetration ───
+	// Microservices penetration: which MS is imported by the most other MSes
+	allMSNames := make(map[string]bool)
+	for _, ms := range microservices {
+		allMSNames[ms.Name] = true
+	}
+	msImportedBy := make(map[string]map[string]bool) // target-ms -> set of source-ms
+	for _, f := range files {
+		srcMS := f.MicroserviceName
+		if srcMS == "" {
+			continue
+		}
+		for _, imp := range f.Imports {
+			impLower := strings.ToLower(imp)
+			for targetMS := range allMSNames {
+				if targetMS == srcMS {
+					continue
+				}
+				if strings.Contains(impLower, strings.ToLower(targetMS)) {
+					if msImportedBy[targetMS] == nil {
+						msImportedBy[targetMS] = make(map[string]bool)
+					}
+					msImportedBy[targetMS][srcMS] = true
+				}
+			}
+		}
+	}
+	type penEntry struct {
+		Name       string
+		Count      int
+		Dependents []string
+	}
+	var penList []penEntry
+	for ms, deps := range msImportedBy {
+		if len(deps) >= 1 {
+			var dl []string
+			for d := range deps {
+				dl = append(dl, d)
+			}
+			sort.Strings(dl)
+			penList = append(penList, penEntry{ms, len(deps), dl})
+		}
+	}
+	sort.Slice(penList, func(i, j int) bool { return penList[i].Count > penList[j].Count })
+	if len(penList) > 20 {
+		penList = penList[:20]
+	}
+
+	msTodos := make(map[string]int)
+	msFixmes := make(map[string]int)
+	for _, f := range files {
+		ms := f.MicroserviceName
+		if ms == "" {
+			ms = "root"
+		}
+		msTodos[ms] += f.TodoCount
+		msFixmes[ms] += f.FixmeCount
+	}
+	type todoEntry struct {
+		Name   string
+		Todos  int
+		Fixmes int
+	}
+	var todoList []todoEntry
+	for ms, todos := range msTodos {
+		fixmes := msFixmes[ms]
+		if todos+fixmes > 0 {
+			todoList = append(todoList, todoEntry{ms, todos, fixmes})
+		}
+	}
+	sort.Slice(todoList, func(i, j int) bool {
+		return todoList[i].Todos+todoList[i].Fixmes > todoList[j].Todos+todoList[j].Fixmes
+	})
+
+	// ─── 4. Longest Functions ───
+	var allFuncs []*parser.FunctionInfo
+	for _, f := range files {
+		if f.LongestFunction != nil {
+			allFuncs = append(allFuncs, f.LongestFunction)
+		}
+	}
+	sort.Slice(allFuncs, func(i, j int) bool { return allFuncs[i].LineCount > allFuncs[j].LineCount })
+	if len(allFuncs) > 20 {
+		allFuncs = allFuncs[:20]
+	}
+
+	// ─── 5. Microservice sections ───
+	var msSections, msGraphScripts strings.Builder
+	graphCounter := 0
+
+	for _, ms := range microservices {
+		sf := make([]*parser.ParsedFile, len(ms.Files))
+		copy(sf, ms.Files)
+		sort.Slice(sf, func(i, j int) bool { return sf[i].LineCount > sf[j].LineCount })
+
+		anchor := strings.ReplaceAll(ms.Name, " ", "-")
+		icon := "🔧"
+		if isAPIGateway(ms.Name) {
+			icon = "🌐"
+		} else if isProtoMS(ms.Name) {
+			icon = "📡"
+		}
+
+		var statsParts []string
+		if ms.StructCount > 0 {
+			statsParts = append(statsParts, fmt.Sprintf("🟢 %d structs", ms.StructCount))
+		}
+		if ms.InterfaceCount > 0 {
+			statsParts = append(statsParts, fmt.Sprintf("🔵 %d interfaces", ms.InterfaceCount))
+		}
+		if ms.EnumCount > 0 {
+			statsParts = append(statsParts, fmt.Sprintf("🟡 %d enums", ms.EnumCount))
+		}
+		if ms.FuncCount > 0 {
+			statsParts = append(statsParts, fmt.Sprintf("⚡ %d funcs", ms.FuncCount))
+		}
+		if ms.MessageCount > 0 {
+			statsParts = append(statsParts, fmt.Sprintf("📨 %d messages", ms.MessageCount))
+		}
+		if ms.ServiceCount > 0 {
+			statsParts = append(statsParts, fmt.Sprintf("📡 %d services", ms.ServiceCount))
+		}
+		if ms.RPCCount > 0 {
+			statsParts = append(statsParts, fmt.Sprintf("🔗 %d RPCs", ms.RPCCount))
+		}
+
+		var fileRows strings.Builder
+		for _, f := range sf {
+			var dp []string
+			for _, d := range f.Declarations {
+				dp = append(dp, fmt.Sprintf("%s&thinsp;%s", kindIcon(d.Kind), esc(d.Name)))
+			}
+			declStr := "—"
+			if len(dp) > 0 {
+				declStr = strings.Join(dp, "&ensp;")
+			}
+			desc := ""
+			if f.Description != "" {
+				short := f.Description
+				if len(short) > 120 {
+					short = short[:120]
+				}
+				desc = fmt.Sprintf("<div class='file-desc'>💡 %s</div>", esc(short))
+			}
+			typeTag := ""
+			if f.FileType == "proto" {
+				typeTag = " <span class='bs-badge'>proto</span>"
+			}
+			fileRows.WriteString(fmt.Sprintf(
+				"<tr><td><strong>%s</strong>%s%s</td><td class='mono'>%d</td><td>%d</td><td class='decl-tags'>%s</td></tr>\n",
+				esc(f.FileName()), typeTag, desc, f.LineCount, len(f.Declarations), declStr,
+			))
+		}
+
+		gID := fmt.Sprintf("ms-graph-%d", graphCounter)
+		graphCounter++
+		gd := buildDeclGraph(ms, g.PageRankScores)
+		gdJ, _ := json.Marshal(gd)
+		showG := len(gd.Nodes) >= 2
+
+		graphDiv := ""
+		if showG {
+			graphDiv = fmt.Sprintf("<div id='%s' class='pkg-graph-container'></div>", gID)
+		}
+
+		msSections.WriteString(fmt.Sprintf(`<div class="package-section" id="ms-%s">
+<h3>%s %s <span class="pkg-stats">%d files · %s lines · %d declarations</span></h3>
+<p class="stats-detail">%s</p>
+%s
+<div class="table-wrap"><table class="file-table">
+<thead><tr><th>File</th><th>Lines</th><th>Decl</th><th>Declarations</th></tr></thead>
+<tbody>%s</tbody>
+</table></div>
+</div>
+`, anchor, icon, esc(ms.Name), len(sf), fmtNum(ms.TotalLines), len(ms.Declarations),
+			strings.Join(statsParts, " · "), graphDiv, fileRows.String()))
+
+		if showG {
+			msGraphScripts.WriteString(fmt.Sprintf(`{
+const d=%s;const el=document.getElementById('%s');
+if(d.nodes.length>0&&el){const kc={'struct':'#34c759','interface':'#007aff','message':'#ff9500','service':'#ff3b30','enum':'#af52de'};
+const g=ForceGraph()(el).graphData(d).nodeLabel(n=>n.label+' ('+n.sublabel+')\n'+n.kind).nodeVal(n=>Math.max(n.score*3000,5)).nodeColor(n=>kc[n.kind]||'#999')
+.nodeCanvasObject((node,ctx,gs)=>{const r=Math.max(Math.sqrt(Math.max(node.score*3000,5))*0.8,3);ctx.beginPath();ctx.arc(node.x,node.y,r,0,2*Math.PI);ctx.fillStyle=kc[node.kind]||'#999';ctx.fill();if(gs>0.5){ctx.font=(Math.max(10/gs,3))+'px -apple-system,sans-serif';ctx.textAlign='center';ctx.fillStyle='#333';ctx.fillText(node.label,node.x,node.y+r+10/gs);}})
+.linkDirectionalArrowLength(8).linkDirectionalArrowRelPos(1).linkColor(()=>'rgba(0,0,0,0.12)').width(el.offsetWidth).height(420);
+g.d3Force('charge').strength(-250);g.d3Force('link').distance(80);}}
+`, string(gdJ), gID))
+		}
+	}
+
+	// ─── Penetration rows ───
+	var penRows strings.Builder
+	for _, pe := range penList {
+		ds := strings.Join(pe.Dependents, ", ")
+		if len(ds) > 80 {
+			ds = ds[:80] + "…"
+		}
+		anchor := strings.ReplaceAll(pe.Name, " ", "-")
+		penRows.WriteString(fmt.Sprintf("<tr><td><a href='#ms-%s' class='pkg-link-inline'>%s</a></td><td class='mono'>%d</td><td style='color:var(--text3);font-size:12px'>%s</td></tr>\n", anchor, esc(pe.Name), pe.Count, esc(ds)))
+	}
+	var todoRows strings.Builder
+	for _, te := range todoList {
+		a := strings.ReplaceAll(te.Name, " ", "-")
+		todoRows.WriteString(fmt.Sprintf("<tr><td><a href='#ms-%s' class='pkg-link-inline'>%s</a></td><td>%d</td><td>%d</td><td><strong>%d</strong></td></tr>\n", a, esc(te.Name), te.Todos, te.Fixmes, te.Todos+te.Fixmes))
+	}
+	var funcRows strings.Builder
+	for _, fn := range allFuncs {
+		fname := filepath.Base(fn.FilePath)
+		ms := "root"
+		if f, ok := fileMap[fn.FilePath]; ok && f.MicroserviceName != "" {
+			ms = f.MicroserviceName
+		}
+		a := strings.ReplaceAll(ms, " ", "-")
+		funcRows.WriteString(fmt.Sprintf("<tr><td><code>%s()</code></td><td class='mono'>%d</td><td>%s</td><td><a href='#ms-%s' class='pkg-link-inline'>%s</a></td></tr>\n", esc(fn.Name), fn.LineCount, esc(fname), a, esc(ms)))
+	}
+
+	// ─── Subdirs display ───
+	subdirDisplay := ""
+	if len(rootSubdirs) > 0 {
+		subdirDisplay = " · <span style='color:var(--text3);font-size:12px'>" + esc(strings.Join(rootSubdirs, " / ")) + "</span>"
+	}
+
+	projDisplay := projectName
+	if projDisplay == "" {
+		projDisplay = "Project"
+	}
+
+	protoCard := ""
+	if totalProtoFiles > 0 {
+		protoCard = fmt.Sprintf(`<div class="summary-card"><div class="num">%d</div><div class="label">📡 Proto Files</div></div>`, totalProtoFiles)
+	}
+	todoCard := ""
+	if totalTodos+totalFixmes > 0 {
+		todoCard = fmt.Sprintf(`<div class="summary-card"><div class="num">%d</div><div class="label">TODO/FIXME</div></div>`, totalTodos+totalFixmes)
+	}
+
+	// ─── HTML ───
+	html := fmt.Sprintf(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔬</text></svg>">
+<title>🔬 goscope — %s</title>
+<style>
+:root{--bg:#f5f5f7;--card:#fff;--border:#e5e5ea;--text:#1d1d1f;--text2:#424245;--text3:#86868b;--accent:#0071e3;--red:#ff3b30;}
+*{box-sizing:border-box;}
+body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','Helvetica Neue',sans-serif;margin:0;padding:20px;background:var(--bg);color:var(--text);line-height:1.5;}
+.container{max-width:1280px;margin:0 auto;}
+.card{background:var(--card);padding:28px;border-radius:16px;box-shadow:0 1px 12px rgba(0,0,0,0.06);margin-bottom:20px;}
+h1{font-size:28px;font-weight:700;margin:0 0 4px 0;}
+h2{color:var(--text2);font-size:20px;border-bottom:2px solid var(--border);padding-bottom:10px;margin:28px 0 16px 0;}
+h3{color:var(--text2);font-size:16px;margin:20px 0 8px 0;}
+.subtitle{color:var(--text3);font-size:14px;margin-bottom:20px;}
+.branch-badge{display:inline-block;background:#e3f2fd;color:#1565c0;padding:2px 10px;border-radius:8px;font-size:13px;font-weight:500;font-family:'SF Mono',Menlo,monospace;}
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:24px;}
+.summary-card{background:var(--bg);border-radius:12px;padding:14px 8px;text-align:center;}
+.summary-card .num{font-size:26px;font-weight:700;color:var(--accent);}
+.summary-card .label{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.04em;margin-top:2px;}
+.team-table,.file-table{width:100%%;border-collapse:collapse;font-size:14px;}
+.team-table th,.file-table th{color:var(--text3);font-weight:500;text-transform:uppercase;font-size:11px;letter-spacing:0.05em;text-align:left;padding:8px 10px;border-bottom:2px solid var(--border);}
+.team-table td,.file-table td{padding:8px 10px;border-bottom:1px solid var(--border);vertical-align:top;}
+.mono{font-family:'SF Mono',Menlo,monospace;font-size:13px;}
+.tag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:500;margin:2px;}
+.tag-tech{background:#e8f5e9;color:#2e7d32;}
+.tag-local{background:#e3f2fd;color:#1565c0;}
+.tag-cloud{line-height:2.2;}
+.pkg-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:4px 8px;}
+.pkg-link{display:flex;align-items:center;justify-content:space-between;text-decoration:none;cursor:pointer;transition:background 0.15s;}
+.pkg-link:hover{background:#bbdefb;}
+.pkg-link-inline{text-decoration:none;cursor:pointer;}
+.pkg-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.bs-badge-right{background:rgba(0,0,0,0.07);color:var(--text3);font-size:9px;padding:1px 5px;border-radius:4px;margin-left:auto;padding-left:6px;flex-shrink:0;font-weight:400;}
+.bs-badge{background:rgba(0,0,0,0.08);color:var(--text3);font-size:10px;padding:1px 5px;border-radius:4px;margin-left:2px;font-weight:400;}
+.count{font-weight:400;color:var(--text3);}
+.hotspot-list{list-style:none;padding:0;margin:0;}
+.hotspot-item{padding:10px 0;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:flex-start;}
+.hotspot-score{font-weight:600;color:var(--red);font-family:'SF Mono',monospace;font-size:13px;white-space:nowrap;}
+.package-section{margin-bottom:32px;padding-bottom:24px;border-bottom:1px solid var(--border);}
+.package-section:last-child{border-bottom:none;}
+.pkg-stats{font-weight:400;color:var(--text3);font-size:13px;margin-left:8px;}
+.stats-detail{color:var(--text3);font-size:13px;margin:4px 0 12px 0;}
+.file-desc{color:var(--text3);font-size:12px;font-style:italic;margin-top:2px;}
+.decl-tags{font-size:12px;line-height:1.8;}
+.pkg-graph-container{width:100%%;height:420px;border:1px solid var(--border);border-radius:10px;margin-bottom:16px;overflow:hidden;background:#fafafa;}
+.arch-graph-container{width:100%%;height:500px;border:1px solid var(--border);border-radius:10px;margin-bottom:16px;overflow:hidden;background:#fafafa;}
+.table-wrap{width:100%%;overflow-x:auto;-webkit-overflow-scrolling:touch;}
+@media(max-width:768px){body{padding:8px;}.card{padding:14px;border-radius:12px;}.summary-grid{grid-template-columns:repeat(3,1fr);gap:6px;}.summary-card{padding:10px 4px;}.summary-card .num{font-size:18px;}.summary-card .label{font-size:9px;}h1{font-size:20px;}h2{font-size:17px;}.team-table,.file-table{font-size:12px;min-width:500px;}.pkg-grid{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));}.pkg-graph-container,.arch-graph-container{height:300px;}}
+</style>
+<script src="https://unpkg.com/force-graph"></script>
+</head>
+<body>
+<div class="container">
+
+<div class="card">
+<h1>🔬 goscope report — %s</h1>
+<p class="subtitle">Generated %s · <span class="branch-badge">%s</span>%s</p>
+<div class="summary-grid">
+    <div class="summary-card"><div class="num">%d</div><div class="label">Microservices</div></div>
+    <div class="summary-card"><div class="num">%d</div><div class="label">Go Files</div></div>
+    %s
+    <div class="summary-card"><div class="num">%s</div><div class="label">Lines of Code</div></div>
+    <div class="summary-card"><div class="num">%d</div><div class="label">Declarations</div></div>
+    %s
+    <div class="summary-card"><div class="num">%d</div><div class="label">🟢 Structs</div></div>
+    <div class="summary-card"><div class="num">%d</div><div class="label">🔵 Interfaces</div></div>
+    <div class="summary-card"><div class="num">%d</div><div class="label">🟡 Enums</div></div>
+    <div class="summary-card"><div class="num">%d</div><div class="label">⚡ Functions</div></div>
+    <div class="summary-card"><div class="num">%d</div><div class="label">📨 Messages</div></div>
+    <div class="summary-card"><div class="num">%d</div><div class="label">📡 Services</div></div>
+    <div class="summary-card"><div class="num">%d</div><div class="label">🔗 RPCs</div></div>
+</div>
+</div>
+
+<div class="card">
+<h2>👥 Team Contribution Map</h2>
+<div class="table-wrap"><table class="team-table">
+<thead><tr><th>Developer</th><th>Files Modified</th><th>Commits</th><th>First Change</th><th>Last Change</th><th>Top-3 Microservices</th></tr></thead>
+<tbody>%s</tbody>
+</table></div>
+</div>
+
+<div class="card">
+<h2>📚 Stack</h2>
+<h3>Technologies</h3>
+<div class="tag-cloud">%s</div>
+<h3 style="margin-top:20px">Microservices <span class="count">(%d)</span></h3>
+<div class="pkg-grid">%s</div>
+<h3 style="margin-top:20px">Architecture</h3>
+<div id="arch-graph" class="arch-graph-container"></div>
+</div>
+
+<div class="card">
+<h2>🔗 Microservices Penetration</h2>
+%s
+<h3>📝 TODO / FIXME</h3>
+%s
+</div>
+
+%s
+
+<div class="card">
+<h2>🔧 Microservices</h2>
+<p class="subtitle">Graphs: type references. <span style="color:#34c759">●</span> struct <span style="color:#007aff">●</span> interface <span style="color:#ff9500">●</span> message <span style="color:#ff3b30">●</span> service <span style="color:#af52de">●</span> enum</p>
+%s
+</div>
+
+<footer style="text-align:center;padding:20px 0 10px;color:var(--text3);font-size:12px;">Generator: <strong>goscope</strong> · MIT License</footer>
+</div>
+
+<script>
+// Architecture graph
+{
+const d=%s;
+const el=document.getElementById('arch-graph');
+if(d.nodes.length>0&&el){
+const kc={'microservice':'#007aff','technology':'#34c759'};
+const g=ForceGraph()(el).graphData(d)
+.nodeLabel(n=>n.label+'\n'+n.kind)
+.nodeVal(n=>n.kind==='microservice'?10:5)
+.nodeColor(n=>kc[n.kind]||'#999')
+.nodeCanvasObject((node,ctx,gs)=>{
+const r=node.kind==='microservice'?7:5;
+ctx.beginPath();ctx.arc(node.x,node.y,r,0,2*Math.PI);
+ctx.fillStyle=kc[node.kind]||'#999';ctx.fill();
+if(gs>0.3){
+ctx.font=(Math.max(10/gs,3))+'px -apple-system,sans-serif';
+ctx.textAlign='center';ctx.fillStyle=node.kind==='microservice'?'#1d1d1f':'#666';
+ctx.fillText(node.label,node.x,node.y+r+12/gs);}})
+.linkColor(()=>'rgba(0,0,0,0.08)')
+.linkWidth(1.5)
+.width(el.offsetWidth).height(500);
+g.d3Force('charge').strength(-350);g.d3Force('link').distance(120);
+}}
+// MS graphs
+%s
+</script>
+</body>
+</html>`,
+		esc(projDisplay),
+		esc(projDisplay),
+		time.Now().Format("2006-01-02 15:04:05"),
+		esc(branchName),
+		subdirDisplay,
+		// Summary cards — MICROSERVICES first
+		len(microservices),
+		totalGoFiles,
+		protoCard,
+		fmtNum(totalLines),
+		totalStructs+totalInterfaces+totalFuncs+totalMessages+totalServices+totalRPCs+totalEnums,
+		todoCard,
+		totalStructs, totalInterfaces, totalEnums, totalFuncs,
+		totalMessages, totalServices, totalRPCs,
+		// Team
+		teamRows.String(),
+		// Stack
+		techTags,
+		len(microservices),
+		msGridHTML.String(),
+		// Insights - penetration
+		func() string {
+			if len(penList) == 0 {
+				return ""
+			}
+			return fmt.Sprintf(`<div class="table-wrap"><table class="file-table">
+<thead><tr><th>Microservice</th><th>Used by</th><th>Dependent Microservices</th></tr></thead>
+<tbody>%s</tbody>
+</table></div>`, penRows.String())
+		}(),
+		func() string {
+			if len(todoList) == 0 {
+				return `<p style="color:var(--text3)">No TODO or FIXME comments found.</p>`
+			}
+			return fmt.Sprintf(`<div class="table-wrap"><table class="file-table">
+<thead><tr><th>Microservice</th><th>TODO</th><th>FIXME</th><th>Total</th></tr></thead>
+<tbody>%s</tbody>
+</table></div>`, todoRows.String())
+		}(),
+		// Longest functions
+		func() string {
+			if len(allFuncs) == 0 {
+				return ""
+			}
+			return fmt.Sprintf(`<div class="card">
+<h2>📏 Longest Functions</h2>
+<div class="table-wrap"><table class="file-table">
+<thead><tr><th>Function</th><th>Lines</th><th>File</th><th>Microservice</th></tr></thead>
+<tbody>%s</tbody>
+</table></div>
+</div>`, funcRows.String())
+		}(),
+		// Microservice sections
+		msSections.String(),
+		// Architecture graph JSON
+		string(archGraphJSON),
+		// MS graph scripts
+		msGraphScripts.String(),
+	)
+
+	dir := filepath.Dir(outputPath)
+	os.MkdirAll(dir, 0755)
+	if err := os.WriteFile(outputPath, []byte(html), 0644); err != nil {
+		return err
+	}
+	fmt.Printf("   HTML written (%dKB)\n", len(html)/1024)
+	return nil
+}
+
+// buildArchitectureGraph builds a graph with all microservices + technologies they use.
+func buildArchitectureGraph(microservices []*MicroserviceSummary, techList []string, files []*parser.ParsedFile) gData {
+	// Collect which technologies each MS uses
+	msTechs := make(map[string]map[string]bool)
+	for _, f := range files {
+		if f.MicroserviceName == "" {
+			continue
+		}
+		if msTechs[f.MicroserviceName] == nil {
+			msTechs[f.MicroserviceName] = make(map[string]bool)
+		}
+		for _, imp := range f.Imports {
+			ts := make(map[string]bool)
+			detectTechFromImport(imp, ts)
+			for t := range ts {
+				msTechs[f.MicroserviceName][t] = true
+			}
+		}
+		if f.FileType == "proto" {
+			msTechs[f.MicroserviceName]["gRPC"] = true
+			msTechs[f.MicroserviceName]["Protocol Buffers"] = true
+		}
+	}
+
+	// Build nodes — all microservices
+	var nodes []gNode
+	msLineMap := make(map[string]int)
+	for _, ms := range microservices {
+		msLineMap[ms.Name] = ms.TotalLines
+	}
+
+	usedTechs := make(map[string]bool)
+	for _, ms := range microservices {
+		score := float64(ms.TotalLines) / 1000.0
+		nodes = append(nodes, gNode{
+			ID: "ms:" + ms.Name, Label: ms.Name, Sublabel: fmtNum(ms.TotalLines) + " loc",
+			Kind: "microservice", Score: score, Group: "ms",
+		})
+		for t := range msTechs[ms.Name] {
+			usedTechs[t] = true
+		}
+	}
+	// Only show technologies actually used by major microservices
+	for _, t := range techList {
+		if usedTechs[t] && t != "Go" { // Skip "Go" as it's universal
+			nodes = append(nodes, gNode{
+				ID: "tech:" + t, Label: t, Sublabel: "technology",
+				Kind: "technology", Score: 3, Group: "tech",
+			})
+		}
+	}
+
+	// Build links: ms -> tech
+	var links []gLink
+	for _, ms := range microservices {
+		for t := range msTechs[ms.Name] {
+			if usedTechs[t] && t != "Go" {
+				links = append(links, gLink{Source: "ms:" + ms.Name, Target: "tech:" + t})
+			}
+		}
+	}
+
+	return gData{Nodes: nodes, Links: links}
+}
+
+func buildDeclGraph(ms *MicroserviceSummary, scores map[string]float64) gData {
+	gk := map[parser.DeclKind]bool{
+		parser.DeclStruct: true, parser.DeclInterface: true,
+		parser.DeclMessage: true, parser.DeclService: true, parser.DeclEnum: true,
+	}
+	type di struct {
+		name, fp, fn string
+		kind         parser.DeclKind
+	}
+	var ad []di
+	for _, f := range ms.Files {
+		for _, d := range f.Declarations {
+			if gk[d.Kind] && len(d.Name) >= 3 {
+				ad = append(ad, di{d.Name, f.FilePath, f.FileName(), d.Kind})
+			}
+		}
+	}
+	if len(ad) > 80 {
+		sort.Slice(ad, func(i, j int) bool { return scores[ad[i].fp] > scores[ad[j].fp] })
+		ad = ad[:80]
+	}
+	nodes := make([]gNode, len(ad))
+	for i, d := range ad {
+		s := scores[d.fp]
+		if s < 0.001 {
+			s = 0.001
+		}
+		nodes[i] = gNode{ID: d.fp + "::" + d.name, Label: d.name, Sublabel: d.fn, Kind: string(d.kind), Score: s, Group: ms.Name}
+	}
+	var links []gLink
+	seen := make(map[string]bool)
+	for _, src := range ad {
+		if src.kind != parser.DeclStruct && src.kind != parser.DeclInterface {
+			continue
+		}
+		content, err := os.ReadFile(src.fp)
+		if err != nil {
+			continue
+		}
+		cs := string(content)
+		for _, tgt := range ad {
+			if tgt.name == src.name {
+				continue
+			}
+			ek := src.name + "->" + tgt.name
+			if seen[ek] {
+				continue
+			}
+			if strings.Contains(cs, tgt.name) {
+				links = append(links, gLink{Source: src.fp + "::" + src.name, Target: tgt.fp + "::" + tgt.name})
+				seen[ek] = true
+			}
+		}
+	}
+	return gData{Nodes: nodes, Links: links}
+}
+
+func isAPIGateway(n string) bool {
+	l := strings.ToLower(n)
+	return strings.Contains(l, "gateway") || strings.Contains(l, "api-gw") || l == "api"
+}
+func isProtoMS(n string) bool {
+	l := strings.ToLower(n)
+	return l == "proto" || l == "protobuf" || l == "protos" || strings.HasPrefix(l, "proto-") || strings.HasSuffix(l, "-proto")
+}
+
+func detectTechFromImport(imp string, techSet map[string]bool) {
+	m := map[string]string{
+		"google.golang.org/grpc": "gRPC", "google.golang.org/protobuf": "Protocol Buffers",
+		"github.com/gin-gonic/gin": "Gin", "github.com/labstack/echo": "Echo",
+		"github.com/gofiber/fiber": "Fiber", "github.com/gorilla/mux": "Gorilla Mux",
+		"github.com/go-chi/chi": "Chi",
+		"gorm.io/gorm": "GORM", "gorm.io/driver/postgres": "PostgreSQL",
+		"github.com/jmoiron/sqlx": "sqlx",
+		"github.com/jackc/pgx": "PostgreSQL", "github.com/lib/pq": "PostgreSQL",
+		"github.com/go-redis/redis": "Redis", "github.com/redis/go-redis": "Redis",
+		"go.mongodb.org/mongo-driver": "MongoDB",
+		"github.com/segmentio/kafka-go": "Kafka", "github.com/IBM/sarama": "Kafka",
+		"github.com/nats-io/nats.go": "NATS",
+		"github.com/streadway/amqp": "RabbitMQ", "github.com/rabbitmq/amqp091-go": "RabbitMQ",
+		"go.uber.org/zap": "Zap Logger", "github.com/sirupsen/logrus": "Logrus", "log/slog": "slog",
+		"go.opentelemetry.io/otel": "OpenTelemetry",
+		"github.com/prometheus/client_golang": "Prometheus",
+		"github.com/elastic/go-elasticsearch": "Elasticsearch",
+		"github.com/ClickHouse/clickhouse-go": "ClickHouse",
+		"github.com/minio/minio-go": "MinIO",
+		"github.com/aws/aws-sdk-go": "AWS SDK", "github.com/aws/aws-sdk-go-v2": "AWS SDK",
+		"cloud.google.com/go": "Google Cloud",
+		"k8s.io/client-go": "Kubernetes Client",
+		"github.com/hashicorp/consul": "Consul", "github.com/hashicorp/vault": "HashiCorp Vault",
+		"go.etcd.io/etcd": "etcd",
+		"github.com/golang-jwt/jwt": "JWT", "github.com/spf13/cobra": "Cobra CLI",
+		"github.com/spf13/viper": "Viper Config",
+		"github.com/grpc-ecosystem/grpc-gateway": "gRPC Gateway",
+		"github.com/99designs/gqlgen": "gqlgen (GraphQL)",
+		"github.com/golang-migrate/migrate": "DB Migrations", "github.com/pressly/goose": "Goose Migrations",
+		"github.com/swaggo/swag": "Swagger", "github.com/stretchr/testify": "Testify",
+	}
+	for prefix, tech := range m {
+		if strings.HasPrefix(imp, prefix) {
+			techSet[tech] = true
+			return
+		}
+	}
+}
+
+func topNKeys(m map[string]int, n int) []string {
+	type kv struct {
+		K string
+		V int
+	}
+	var s []kv
+	for k, v := range m {
+		s = append(s, kv{k, v})
+	}
+	sort.Slice(s, func(i, j int) bool { return s[i].V > s[j].V })
+	var r []string
+	for i, x := range s {
+		if i >= n {
+			break
+		}
+		r = append(r, x.K)
+	}
+	return r
+}
+
+func kindIcon(k parser.DeclKind) string {
+	switch k {
+	case parser.DeclStruct:
+		return "🟢"
+	case parser.DeclInterface:
+		return "🔵"
+	case parser.DeclFunc:
+		return "⚡"
+	case parser.DeclMessage:
+		return "📨"
+	case parser.DeclService:
+		return "📡"
+	case parser.DeclRPC:
+		return "🔗"
+	case parser.DeclEnum:
+		return "🟡"
+	default:
+		return "⚪"
+	}
+}
+
+func esc(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, "\"", "&quot;")
+	return s
+}
+
+func fmtNum(n int) string {
+	s := fmt.Sprintf("%d", n)
+	if n < 1000 {
+		return s
+	}
+	var r []byte
+	for i, ch := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			r = append(r, ',')
+		}
+		r = append(r, byte(ch))
+	}
+	return string(r)
+}
