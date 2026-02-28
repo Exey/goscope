@@ -40,7 +40,7 @@ That's it. Go compiles automatically, then opens the HTML report in your browser
    - **Architecture** — interactive force-directed graph showing how major microservices connect to technologies
    - **Microservices** — clickable grid of all detected microservices; top 8 by code size (or all ≥ 8K lines) are highlighted with a border
 
-4. **📋 Module Insights** — package penetration analysis (which Go packages are imported across the most microservices) plus TODO/FIXME density per microservice
+4. **📋 Microservices Penetration** — package penetration analysis (which Go packages are imported across the most microservices) plus TODO/FIXME density per microservice
 
 5. **📏 Longest Functions** — ranked list of functions by line count, with clickable microservice badges
 
