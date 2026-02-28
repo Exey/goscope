@@ -367,6 +367,10 @@ func Generate(
 
 		var fileRows strings.Builder
 		for _, f := range sf {
+			// Skip module.go files from visual listing (DI wiring boilerplate)
+			if f.FileName() == "module.go" {
+				continue
+			}
 			var dp []string
 			for _, d := range f.Declarations {
 				dp = append(dp, fmt.Sprintf("%s&thinsp;%s", kindIcon(d.Kind), esc(d.Name)))
@@ -565,14 +569,15 @@ h3{color:var(--text2);font-size:16px;margin:20px 0 8px 0;}
 <div class="tag-cloud">%s</div>
 <h3 style="margin-top:20px">Microservices <span class="count">(%d)</span></h3>
 <div class="pkg-grid">%s</div>
-<h3 style="margin-top:20px">Architecture</h3>
+<h3 style="margin-top:24px">Architecture</h3>
+<p class="subtitle" style="margin-bottom:8px">Microservices and the technologies they depend on.</p>
 <div id="arch-graph" class="arch-graph-container"></div>
 </div>
 
 <div class="card">
 <h2>🔗 Microservices Penetration</h2>
 %s
-<h3>📝 TODO / FIXME</h3>
+<h3 style="margin-top:24px">📝 TODO / FIXME</h3>
 %s
 </div>
 
@@ -596,10 +601,10 @@ if(d.nodes.length>0&&el){
 const kc={'microservice':'#007aff','technology':'#34c759'};
 const g=ForceGraph()(el).graphData(d)
 .nodeLabel(n=>n.label+'\n'+n.kind)
-.nodeVal(n=>n.kind==='microservice'?10:5)
+.nodeVal(n=>n.kind==='microservice'?8:5)
 .nodeColor(n=>kc[n.kind]||'#999')
 .nodeCanvasObject((node,ctx,gs)=>{
-const r=node.kind==='microservice'?7:5;
+const r=node.kind==='microservice'?6:4;
 ctx.beginPath();ctx.arc(node.x,node.y,r,0,2*Math.PI);
 ctx.fillStyle=kc[node.kind]||'#999';ctx.fill();
 if(gs>0.3){
@@ -772,15 +777,28 @@ func buildDeclGraph(ms *MicroserviceSummary, scores map[string]float64) gData {
 		ad = ad[:80]
 	}
 	nodes := make([]gNode, len(ad))
+	nodeScores := make(map[string]float64)
 	for i, d := range ad {
 		s := scores[d.fp]
 		if s < 0.001 {
 			s = 0.001
 		}
-		nodes[i] = gNode{ID: d.fp + "::" + d.name, Label: d.name, Sublabel: d.fn, Kind: string(d.kind), Score: s, Group: ms.Name}
+		nid := d.fp + "::" + d.name
+		nodes[i] = gNode{ID: nid, Label: d.name, Sublabel: d.fn, Kind: string(d.kind), Score: s, Group: ms.Name}
+		nodeScores[nid] = s
 	}
-	var links []gLink
+
+	// ── Smart edge building ──
+	// Instead of naive strings.Contains, use Go-aware type-reference matching:
+	// match "TypeName" only when preceded by *, [], space/tab/newline/( and followed
+	// by non-identifier char. Skip very short names (≤4 chars) to avoid false positives.
+	type candidate struct {
+		target    string
+		tgtScore  float64
+	}
+	outgoing := make(map[string][]candidate) // src node ID -> candidates
 	seen := make(map[string]bool)
+
 	for _, src := range ad {
 		if src.kind != parser.DeclStruct && src.kind != parser.DeclInterface {
 			continue
@@ -790,21 +808,88 @@ func buildDeclGraph(ms *MicroserviceSummary, scores map[string]float64) gData {
 			continue
 		}
 		cs := string(content)
+		srcID := src.fp + "::" + src.name
+
 		for _, tgt := range ad {
-			if tgt.name == src.name {
+			if tgt.name == src.name || tgt.fp == src.fp && tgt.name == src.name {
+				continue
+			}
+			// Skip very short names — they match too broadly
+			if len(tgt.name) <= 4 {
 				continue
 			}
 			ek := src.name + "->" + tgt.name
 			if seen[ek] {
 				continue
 			}
-			if strings.Contains(cs, tgt.name) {
-				links = append(links, gLink{Source: src.fp + "::" + src.name, Target: tgt.fp + "::" + tgt.name})
+			// Go-aware matching: look for the type name as a standalone identifier
+			// used in struct fields, function params, or variable declarations.
+			// Match patterns: *TypeName, []TypeName, TypeName{, TypeName), :TypeName,
+			// or after whitespace/tab/newline.
+			if matchGoTypeRef(cs, tgt.name) {
+				tgtID := tgt.fp + "::" + tgt.name
+				outgoing[srcID] = append(outgoing[srcID], candidate{tgtID, nodeScores[tgtID]})
 				seen[ek] = true
 			}
 		}
 	}
+
+	// Cap outgoing edges per node: keep top 5 by target score
+	maxOutPerNode := 5
+	var links []gLink
+	for srcID, cands := range outgoing {
+		sort.Slice(cands, func(i, j int) bool { return cands[i].tgtScore > cands[j].tgtScore })
+		limit := maxOutPerNode
+		if limit > len(cands) {
+			limit = len(cands)
+		}
+		for _, c := range cands[:limit] {
+			links = append(links, gLink{Source: srcID, Target: c.target})
+		}
+	}
+
+	// Global cap: max 3 edges per node for readability
+	maxEdges := len(nodes) * 3
+	if maxEdges < 10 {
+		maxEdges = 10
+	}
+	if len(links) > maxEdges {
+		links = links[:maxEdges]
+	}
+
 	return gData{Nodes: nodes, Links: links}
+}
+
+// matchGoTypeRef checks if typeName appears as a Go type reference in source code,
+// not just as a substring. It looks for the name preceded by a type-usage context
+// character (*, [, space, tab, newline, (, comma) and followed by a non-identifier char.
+func matchGoTypeRef(source, typeName string) bool {
+	tl := len(typeName)
+	sl := len(source)
+	for i := 0; i <= sl-tl; i++ {
+		// Check if typeName matches at position i
+		if source[i:i+tl] != typeName {
+			continue
+		}
+		// Check preceding character: must be a type-context char
+		if i > 0 {
+			prev := source[i-1]
+			if isIdentChar(prev) {
+				continue // part of a longer identifier like "MyReport" matching "Report"
+			}
+		}
+		// Check following character: must NOT be an identifier char
+		after := i + tl
+		if after < sl && isIdentChar(source[after]) {
+			continue // part of "ReportService" matching "Report"
+		}
+		return true
+	}
+	return false
+}
+
+func isIdentChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
 }
 
 func isAPIGateway(n string) bool {
