@@ -1,13 +1,13 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,12 +22,6 @@ import (
 const version = "1.0.0"
 
 func main() {
-	analyzeCmd := flag.NewFlagSet("analyze", flag.ExitOnError)
-	initCmd := flag.NewFlagSet("init", flag.ExitOnError)
-
-	analyzeVerbose := analyzeCmd.Bool("verbose", false, "Enable verbose logging")
-	analyzeOpen := analyzeCmd.Bool("open", false, "Open report in browser after generation")
-
 	if len(os.Args) < 2 {
 		runAnalyze(".", false, false)
 		return
@@ -35,28 +29,43 @@ func main() {
 
 	switch os.Args[1] {
 	case "analyze":
-		analyzeCmd.Parse(os.Args[2:])
-		path := "."
-		if analyzeCmd.NArg() > 0 {
-			path = analyzeCmd.Arg(0)
-		}
-		runAnalyze(path, *analyzeVerbose, *analyzeOpen)
+		path, verbose, open := parseAnalyzeArgs(os.Args[2:])
+		runAnalyze(path, verbose, open)
 	case "init":
-		initCmd.Parse(os.Args[2:])
 		runInit()
 	case "--version", "-v":
 		fmt.Printf("goscope %s\n", version)
 	case "--help", "-h":
 		printHelp()
 	default:
-		if info, err := os.Stat(os.Args[1]); err == nil && info.IsDir() {
-			runAnalyze(os.Args[1], false, false)
+		// Treat everything as: goscope [path] [--open] [--verbose]
+		path, verbose, open := parseAnalyzeArgs(os.Args[1:])
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			runAnalyze(path, verbose, open)
 		} else {
-			fmt.Printf("Unknown command: %s\n", os.Args[1])
+			fmt.Printf("Unknown command or invalid path: %s\n", os.Args[1])
 			printHelp()
 			os.Exit(1)
 		}
 	}
+}
+
+// parseAnalyzeArgs extracts path, --verbose, --open from args in any order.
+func parseAnalyzeArgs(args []string) (path string, verbose, open bool) {
+	path = "."
+	for _, arg := range args {
+		switch arg {
+		case "--open", "-open":
+			open = true
+		case "--verbose", "-verbose":
+			verbose = true
+		default:
+			if !strings.HasPrefix(arg, "-") {
+				path = arg
+			}
+		}
+	}
+	return
 }
 
 func printHelp() {
