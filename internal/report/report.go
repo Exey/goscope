@@ -355,7 +355,41 @@ func Generate(
 		return todoList[i].Todos+todoList[i].Fixmes > todoList[j].Todos+todoList[j].Fixmes
 	})
 
-	// ─── 4. Longest Functions ───
+	// ─── 4. Hot Zones (top 10 by PageRank) ───
+	hotspots := g.GetTopHotspots(30) // fetch more, then filter
+	var hotspotRows strings.Builder
+	hotspotCount := 0
+	for _, h := range hotspots {
+		if hotspotCount >= 10 {
+			break
+		}
+		fname := filepath.Base(h.Path)
+		// Skip module.go
+		if fname == "module.go" {
+			continue
+		}
+		ms := "root"
+		var lineCount, declCount int
+		if f, ok := fileMap[h.Path]; ok {
+			if f.MicroserviceName != "" {
+				ms = f.MicroserviceName
+			}
+			lineCount = f.LineCount
+			declCount = len(f.Declarations)
+		}
+		// Build a short relative path: microservice/...last dirs/filename
+		displayPath := shortRelPath(h.Path, ms)
+		displayDir, displayFile := splitDirFile(displayPath)
+
+		anchor := strings.ReplaceAll(ms, " ", "-")
+		hotspotRows.WriteString(fmt.Sprintf(
+			"<tr><td><span style='color:var(--text3)'>%s</span><strong>%s</strong></td><td class='mono'>%.4f</td><td class='mono'>%d</td><td class='mono'>%d</td><td><a href='#ms-%s' class='tag tag-local pkg-link-inline' style='font-size:11px'>%s</a></td></tr>\n",
+			esc(displayDir), esc(displayFile), h.Score, lineCount, declCount, anchor, esc(ms),
+		))
+		hotspotCount++
+	}
+
+	// ─── 5. Longest Functions ───
 	var allFuncs []*parser.FunctionInfo
 	for _, f := range files {
 		if f.LongestFunction != nil {
@@ -401,7 +435,7 @@ func Generate(
 			statsParts = append(statsParts, fmt.Sprintf("📨 %d messages", ms.MessageCount))
 		}
 		if ms.ServiceCount > 0 {
-			statsParts = append(statsParts, fmt.Sprintf("🔴 %d services", ms.ServiceCount))
+			statsParts = append(statsParts, fmt.Sprintf("🔴 %d gRPC services", ms.ServiceCount))
 		}
 		if ms.RPCCount > 0 {
 			statsParts = append(statsParts, fmt.Sprintf("🔗 %d RPCs", ms.RPCCount))
@@ -514,6 +548,10 @@ g.d3Force('charge').strength(-250);g.d3Force('link').distance(80);}}
 	if totalProtoFiles > 0 {
 		protoCard = fmt.Sprintf(`<div class="summary-card"><div class="num">%d</div><div class="label">📡 Proto Files</div></div>`, totalProtoFiles)
 	}
+	grpcCard := ""
+	if totalServices > 0 {
+		grpcCard = fmt.Sprintf(`<div class="summary-card"><div class="num">%d</div><div class="label">🔴 gRPC Services</div></div>`, totalServices)
+	}
 	todoCard := ""
 	if totalTodos+totalFixmes > 0 {
 		todoCard = fmt.Sprintf(`<div class="summary-card"><div class="num">%d</div><div class="label">TODO/FIXME</div></div>`, totalTodos+totalFixmes)
@@ -580,7 +618,6 @@ h3{color:var(--text2);font-size:16px;margin:20px 0 8px 0;}
 <div class="summary-grid">
     <div class="summary-card"><div class="num">%d</div><div class="label">Microservices</div></div>
     <div class="summary-card"><div class="num">%d</div><div class="label">Go Files</div></div>
-    %s
     <div class="summary-card"><div class="num">%s</div><div class="label">Lines of Code</div></div>
     <div class="summary-card"><div class="num">%d</div><div class="label">Declarations</div></div>
     %s
@@ -588,9 +625,8 @@ h3{color:var(--text2);font-size:16px;margin:20px 0 8px 0;}
     <div class="summary-card"><div class="num">%d</div><div class="label">🔵 Interfaces</div></div>
     <div class="summary-card"><div class="num">%d</div><div class="label">🟡 Enums</div></div>
     <div class="summary-card"><div class="num">%d</div><div class="label">🟠 Functions</div></div>
-    <div class="summary-card"><div class="num">%d</div><div class="label">📨 Messages</div></div>
-    <div class="summary-card"><div class="num">%d</div><div class="label">🔴 Services</div></div>
-    <div class="summary-card"><div class="num">%d</div><div class="label">🔗 RPCs</div></div>
+    %s
+    %s
     %s
 </div>
 </div>
@@ -619,6 +655,8 @@ h3{color:var(--text2);font-size:16px;margin:20px 0 8px 0;}
 <h3 style="margin-top:24px">📝 TODO / FIXME</h3>
 %s
 </div>
+
+%s
 
 %s
 
@@ -668,12 +706,12 @@ g.d3Force('charge').strength(-350);g.d3Force('link').distance(120);
 		// Summary cards
 		totalMSCount,
 		totalGoFiles,
-		protoCard,
 		fmtNum(totalLines),
 		totalStructs+totalInterfaces+totalFuncs+totalMessages+totalServices+totalRPCs+totalEnums,
 		todoCard,
 		totalStructs, totalInterfaces, totalEnums, totalFuncs,
-		totalMessages, totalServices, totalRPCs,
+		protoCard,
+		grpcCard,
 		foreignLangCards,
 		// Team
 		teamRows.String(),
@@ -699,6 +737,20 @@ g.d3Force('charge').strength(-350);g.d3Force('link').distance(120);
 <thead><tr><th>Microservice</th><th>TODO</th><th>FIXME</th><th>Total</th></tr></thead>
 <tbody>%s</tbody>
 </table></div>`, todoRows.String())
+		}(),
+		// Hot Zones
+		func() string {
+			if hotspotCount == 0 {
+				return ""
+			}
+			return fmt.Sprintf(`<div class="card">
+<h2>🔥 Hot Zones</h2>
+<p class="subtitle">Files with the highest dependency score (PageRank). These are the most interconnected files in the codebase.</p>
+<div class="table-wrap"><table class="file-table">
+<thead><tr><th>File</th><th>Score</th><th>Lines</th><th>Decl</th><th>Microservice</th></tr></thead>
+<tbody>%s</tbody>
+</table></div>
+</div>`, hotspotRows.String())
 		}(),
 		// Longest functions
 		func() string {
@@ -1009,6 +1061,35 @@ func kindIcon(k parser.DeclKind) string {
 	default:
 		return "⚪"
 	}
+}
+
+// splitDirFile splits "internal/domain/personal_data.go" into ("internal/domain/", "personal_data.go").
+func splitDirFile(path string) (dir, file string) {
+	// Normalize to forward slashes for display
+	path = strings.ReplaceAll(path, "\\", "/")
+	idx := strings.LastIndex(path, "/")
+	if idx >= 0 {
+		return path[:idx+1], path[idx+1:]
+	}
+	return "", path
+}
+
+// shortRelPath builds a display path like "internal/domain/resp/types.go"
+// by finding the microservice name in the path and showing what comes after it.
+func shortRelPath(fullPath, msName string) string {
+	sep := string(filepath.Separator)
+	// Find microservice name in path
+	idx := strings.Index(fullPath, sep+msName+sep)
+	if idx >= 0 {
+		rel := fullPath[idx+len(sep)+len(msName)+len(sep):]
+		return rel
+	}
+	// Fallback: show last 3 path segments
+	parts := strings.Split(fullPath, sep)
+	if len(parts) > 3 {
+		return strings.Join(parts[len(parts)-3:], "/")
+	}
+	return filepath.Base(fullPath)
 }
 
 func esc(s string) string {

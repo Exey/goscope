@@ -25,29 +25,31 @@ Where `~/backend` is the **parent folder** where all your backend service reposi
 └── docker-compose.yml
 ```
 
-That's it. Go compiles automatically, then opens the HTML report in your browser.
+Services are auto-detected up to 3 levels deep, so layouts like `src/<service>/` or `services/<service>/` also work. Non-Go services (Python, Java, PHP, etc.) are detected and shown in the report with language badges.
 
 ---
 
 ### What the Report Contains
 
-1. **📊 Summary** — microservice count, Go files, proto files, lines of code, and declarations by type (structs, interfaces, enums, functions, messages, services, RPCs)
+1. **📊 Summary** — microservice count, Go files, lines of code, declarations by type (structs, interfaces, enums, functions), proto files, gRPC services. Non-Go services detected in the repo tree get line count cards per language (Python, Java, etc.)
 
 2. **👥 Team Contribution Map** — developer activity with files modified, commit counts, first/last change dates, and **top-3 microservices** per author. Git history is collected from each cloned repo's `.git` independently
 
-3. **📚 Stack** — three subsections:
-   - **Technologies** — auto-detected from Go imports (`pgx` → PostgreSQL, `sarama` → Kafka, etc.), `go.mod` dependencies, `docker-compose.yml` images/ports, and `Makefile` hints
-   - **Architecture** — interactive force-directed graph showing how major microservices connect to technologies
-   - **Microservices** — clickable grid of all detected microservices; top 8 by code size (or all ≥ 8K lines) are highlighted with a border
+3. **📚 Tech Stack** — three subsections:
+   - **Technologies** — auto-detected from Go imports (`pgx` → PostgreSQL, `sarama` → Kafka, etc.), `go.mod` dependencies, `docker-compose.yml` images/ports, and `Makefile` hints. Non-Go languages shown with orange badges
+   - **Microservices** — clickable grid of all detected microservices, including non-Go services with language badges
+   - **Architecture** — interactive force-directed graph showing how microservices connect to technologies
 
-4. **📋 Microservices Penetration** — package penetration analysis (which Go packages are imported across the most microservices) plus TODO/FIXME density per microservice
+4. **🔗 Microservices Penetration** — which microservice is imported by the most other microservices, plus TODO/FIXME density per microservice
 
-5. **📏 Longest Functions** — ranked list of functions by line count, with clickable microservice badges
+5. **🔥 Hot Zones** — top 10 most interconnected files by PageRank dependency score, with clickable microservice badges
 
-6. **🔧 Microservices** — detailed breakdown of each microservice (starting with API Gateway, then Proto, then by size):
+6. **📏 Longest Functions** — ranked list of functions by line count, with clickable microservice badges
+
+7. **🔧 Microservices** — detailed breakdown of each microservice (starting with API Gateway, then Proto, then by size):
    - Complete file inventory sorted by lines of code
-   - Declaration statistics (structs, interfaces, enums, funcs, proto messages/services/RPCs)
-   - Interactive force-directed dependency graph per microservice
+   - Declaration statistics (structs, interfaces, enums, funcs, gRPC services/RPCs)
+   - Interactive force-directed dependency graph per microservice (includes big functions ≥50 lines)
 
 ---
 
