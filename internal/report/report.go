@@ -508,7 +508,7 @@ const g=ForceGraph()(el).graphData(d).nodeLabel(n=>n.label+' ('+n.sublabel+')\n'
 .nodeCanvasObject((node,ctx,gs)=>{const r=Math.max(Math.sqrt(Math.max(node.score*3000,5))*0.8,3);ctx.beginPath();ctx.arc(node.x,node.y,r,0,2*Math.PI);ctx.fillStyle=kc[node.kind]||'#999';ctx.fill();if(gs>0.5){ctx.font=(Math.max(10/gs,3))+'px -apple-system,sans-serif';ctx.textAlign='center';ctx.fillStyle='#333';ctx.fillText(node.label,node.x,node.y+r+10/gs);}})
 .linkDirectionalArrowLength(8).linkDirectionalArrowRelPos(1).linkColor(()=>'rgba(0,0,0,0.12)').width(el.offsetWidth).height(420)
 .onEngineStop(()=>g.zoomToFit(400,40));
-g.d3Force('charge').strength(-150);g.d3Force('link').distance(60);}}
+g.d3Force('charge').strength(-120);g.d3Force('link').distance(50);g.d3Force('x',d3.forceX().strength(0.15));g.d3Force('y',d3.forceY().strength(0.15));}}
 `, string(gdJ), gID))
 		}
 	}
@@ -612,6 +612,7 @@ h3{color:var(--text2);font-size:16px;margin:20px 0 8px 0;}
 .table-wrap{width:100%%;overflow-x:auto;-webkit-overflow-scrolling:touch;}
 @media(max-width:768px){body{padding:8px;}.card{padding:14px;border-radius:12px;}.summary-grid{grid-template-columns:repeat(3,1fr);gap:6px;}.summary-card{padding:10px 4px;}.summary-card .num{font-size:18px;}.summary-card .label{font-size:9px;}h1{font-size:20px;}h2{font-size:17px;}.team-table,.file-table{font-size:12px;min-width:500px;}.pkg-grid{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));}.pkg-graph-container,.arch-graph-container{height:300px;}}
 </style>
+<script src="https://unpkg.com/d3-force@3"></script>
 <script src="https://unpkg.com/force-graph"></script>
 </head>
 <body>
@@ -691,7 +692,7 @@ ctx.fillText(node.label,node.x,node.y+r+12/gs);}})
 .linkWidth(1.5)
 .width(el.offsetWidth).height(500)
 .onEngineStop(()=>g.zoomToFit(400,40));
-g.d3Force('charge').strength(-250);g.d3Force('link').distance(100);
+g.d3Force('charge').strength(-200);g.d3Force('link').distance(90);g.d3Force('x',d3.forceX().strength(0.12));g.d3Force('y',d3.forceY().strength(0.12));
 }}
 // MS graphs
 %s
@@ -1088,13 +1089,25 @@ func buildDeclGraph(ms *MicroserviceSummary, scores map[string]float64) gData {
 		links = links[:maxEdges]
 	}
 
-	if nodes == nil {
-		nodes = make([]gNode, 0)
+	// Remove orphan nodes (no edges) — they fly away and break zoomToFit
+	linkedIDs := make(map[string]bool)
+	for _, l := range links {
+		linkedIDs[l.Source] = true
+		linkedIDs[l.Target] = true
+	}
+	var connectedNodes []gNode
+	for _, n := range nodes {
+		if linkedIDs[n.ID] {
+			connectedNodes = append(connectedNodes, n)
+		}
+	}
+	if connectedNodes == nil {
+		connectedNodes = make([]gNode, 0)
 	}
 	if links == nil {
 		links = make([]gLink, 0)
 	}
-	return gData{Nodes: nodes, Links: links}
+	return gData{Nodes: connectedNodes, Links: links}
 }
 
 func matchGoTypeRef(source, typeName string) bool {
