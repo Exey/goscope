@@ -665,7 +665,7 @@ h3{color:var(--text2);font-size:16px;margin:20px 0 8px 0;}
 %s
 </div>
 
-<footer style="text-align:center;padding:20px 0 10px;color:var(--text3);font-size:12px;">Generator: <strong>goscope</strong> · MIT License</footer>
+<footer style="text-align:center;padding:20px 0 10px;color:var(--text3);font-size:12px;">Generator: <a href="https://github.com/Exey/goscope" style="color:var(--accent);text-decoration:none;font-weight:600;">goscope</a> · MIT License · Exey Panteleev</footer>
 </div>
 
 <script>
