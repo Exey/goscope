@@ -120,7 +120,7 @@ func ParseGoFile(filePath, microservice string) (*ParsedFile, error) {
 						FilePath:  filePath,
 					}
 				}
-				if length >= 50 {
+				if length >= 25 {
 					bigFuncs = append(bigFuncs, FunctionInfo{
 						Name:      curFuncName,
 						LineCount: length,

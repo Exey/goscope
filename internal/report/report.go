@@ -73,6 +73,10 @@ type gData struct {
 	Links []gLink `json:"links"`
 }
 
+func newGData() gData {
+	return gData{Nodes: make([]gNode, 0), Links: make([]gLink, 0)}
+}
+
 func Generate(
 	g *graph.DependencyGraph,
 	outputPath string,
@@ -502,8 +506,9 @@ const d=%s;const el=document.getElementById('%s');
 if(d.nodes.length>0&&el){const kc={'struct':'#34c759','interface':'#007aff','message':'#ff9500','service':'#ff3b30','enum':'#af52de','func':'#ff9500'};
 const g=ForceGraph()(el).graphData(d).nodeLabel(n=>n.label+' ('+n.sublabel+')\n'+n.kind).nodeVal(n=>Math.max(n.score*3000,5)).nodeColor(n=>kc[n.kind]||'#999')
 .nodeCanvasObject((node,ctx,gs)=>{const r=Math.max(Math.sqrt(Math.max(node.score*3000,5))*0.8,3);ctx.beginPath();ctx.arc(node.x,node.y,r,0,2*Math.PI);ctx.fillStyle=kc[node.kind]||'#999';ctx.fill();if(gs>0.5){ctx.font=(Math.max(10/gs,3))+'px -apple-system,sans-serif';ctx.textAlign='center';ctx.fillStyle='#333';ctx.fillText(node.label,node.x,node.y+r+10/gs);}})
-.linkDirectionalArrowLength(8).linkDirectionalArrowRelPos(1).linkColor(()=>'rgba(0,0,0,0.12)').width(el.offsetWidth).height(420);
-g.d3Force('charge').strength(-250);g.d3Force('link').distance(80);}}
+.linkDirectionalArrowLength(8).linkDirectionalArrowRelPos(1).linkColor(()=>'rgba(0,0,0,0.12)').width(el.offsetWidth).height(420)
+.onEngineStop(()=>g.zoomToFit(400,40));
+g.d3Force('charge').strength(-150);g.d3Force('link').distance(60);}}
 `, string(gdJ), gID))
 		}
 	}
@@ -656,7 +661,7 @@ h3{color:var(--text2);font-size:16px;margin:20px 0 8px 0;}
 
 <div class="card">
 <h2>🔧 Microservices</h2>
-<p class="subtitle">Graphs: type references + big functions. <span style="color:#34c759">●</span> struct <span style="color:#007aff">●</span> interface <span style="color:#ff9500">●</span> message/func <span style="color:#ff3b30">●</span> service <span style="color:#af52de">●</span> enum</p>
+<p class="subtitle">Graphs: cross-file references &amp; co-location. <span style="color:#34c759">●</span> struct <span style="color:#007aff">●</span> interface <span style="color:#ff9500">●</span> func/message <span style="color:#ff3b30">●</span> service <span style="color:#af52de">●</span> enum</p>
 %s
 </div>
 
@@ -684,8 +689,9 @@ ctx.textAlign='center';ctx.fillStyle=node.kind==='technology'?'#666':'#1d1d1f';
 ctx.fillText(node.label,node.x,node.y+r+12/gs);}})
 .linkColor(()=>'rgba(0,0,0,0.08)')
 .linkWidth(1.5)
-.width(el.offsetWidth).height(500);
-g.d3Force('charge').strength(-350);g.d3Force('link').distance(120);
+.width(el.offsetWidth).height(500)
+.onEngineStop(()=>g.zoomToFit(400,40));
+g.d3Force('charge').strength(-250);g.d3Force('link').distance(100);
 }}
 // MS graphs
 %s
@@ -853,12 +859,20 @@ func buildArchitectureGraph(microservices []*MicroserviceSummary, techList []str
 		links = append(links, gLink{Source: "ms:" + fs.Name, Target: "tech:" + fs.Language})
 	}
 
+	if nodes == nil {
+		nodes = make([]gNode, 0)
+	}
+	if links == nil {
+		links = make([]gLink, 0)
+	}
 	return gData{Nodes: nodes, Links: links}
 }
 
-// buildDeclGraph builds the per-microservice declaration graph, including big functions.
+// buildDeclGraph builds the per-microservice declaration graph.
+// Nodes: structs, interfaces, messages, services, enums, and functions (all DeclFunc + BigFunctions).
+// Edges: cross-file type references + co-location in the same file.
 func buildDeclGraph(ms *MicroserviceSummary, scores map[string]float64) gData {
-	gk := map[parser.DeclKind]bool{
+	typeKinds := map[parser.DeclKind]bool{
 		parser.DeclStruct: true, parser.DeclInterface: true,
 		parser.DeclMessage: true, parser.DeclService: true, parser.DeclEnum: true,
 	}
@@ -866,24 +880,42 @@ func buildDeclGraph(ms *MicroserviceSummary, scores map[string]float64) gData {
 		name, fp, fn string
 		kind         parser.DeclKind
 	}
+
+	// Collect all type declarations as nodes
 	var ad []di
+	funcSet := make(map[string]bool) // track func names to avoid duplication with BigFunctions
 	for _, f := range ms.Files {
 		for _, d := range f.Declarations {
-			if gk[d.Kind] && len(d.Name) >= 3 {
+			if typeKinds[d.Kind] && len(d.Name) >= 3 {
 				ad = append(ad, di{d.Name, f.FilePath, f.FileName(), d.Kind})
 			}
+			if d.Kind == parser.DeclFunc && len(d.Name) >= 3 {
+				key := f.FilePath + "::" + d.Name
+				if !funcSet[key] {
+					ad = append(ad, di{d.Name, f.FilePath, f.FileName(), parser.DeclFunc})
+					funcSet[key] = true
+				}
+			}
 		}
-		// Add big functions (>=50 lines) to the graph
+		// Also add BigFunctions that might not be in declarations
 		for _, bf := range f.BigFunctions {
-			ad = append(ad, di{bf.Name, bf.FilePath, f.FileName(), parser.DeclFunc})
+			key := bf.FilePath + "::" + bf.Name
+			if !funcSet[key] {
+				ad = append(ad, di{bf.Name, bf.FilePath, f.FileName(), parser.DeclFunc})
+				funcSet[key] = true
+			}
 		}
 	}
+
+	// Cap nodes — keep highest-scored files' declarations
 	if len(ad) > 80 {
 		sort.Slice(ad, func(i, j int) bool { return scores[ad[i].fp] > scores[ad[j].fp] })
 		ad = ad[:80]
 	}
+
 	nodes := make([]gNode, len(ad))
 	nodeScores := make(map[string]float64)
+	nodeSet := make(map[string]bool) // valid node IDs
 	for i, d := range ad {
 		s := scores[d.fp]
 		if s < 0.001 {
@@ -892,8 +924,19 @@ func buildDeclGraph(ms *MicroserviceSummary, scores map[string]float64) gData {
 		nid := d.fp + "::" + d.name
 		nodes[i] = gNode{ID: nid, Label: d.name, Sublabel: d.fn, Kind: string(d.kind), Score: s, Group: ms.Name}
 		nodeScores[nid] = s
+		nodeSet[nid] = true
 	}
 
+	// Pre-read all files in this microservice
+	fileContents := make(map[string]string)
+	for _, f := range ms.Files {
+		content, err := os.ReadFile(f.FilePath)
+		if err == nil {
+			fileContents[f.FilePath] = string(content)
+		}
+	}
+
+	// ── Build edges ──
 	type candidate struct {
 		target   string
 		tgtScore float64
@@ -901,25 +944,81 @@ func buildDeclGraph(ms *MicroserviceSummary, scores map[string]float64) gData {
 	outgoing := make(map[string][]candidate)
 	seen := make(map[string]bool)
 
-	for _, src := range ad {
-		if src.kind != parser.DeclStruct && src.kind != parser.DeclInterface && src.kind != parser.DeclFunc {
-			continue
-		}
-		content, err := os.ReadFile(src.fp)
-		if err != nil {
-			continue
-		}
-		cs := string(content)
-		srcID := src.fp + "::" + src.name
+	// Group nodes by file for co-location edges
+	fileNodes := make(map[string][]di)
+	for _, d := range ad {
+		fileNodes[d.fp] = append(fileNodes[d.fp], d)
+	}
 
+	// Strategy 1: Cross-file references
+	// For each file, check which names from OTHER files appear in it
+	for fp, cs := range fileContents {
+		localNames := make(map[string]bool)
+		for _, d := range fileNodes[fp] {
+			localNames[d.name] = true
+		}
+		for _, d := range fileNodes[fp] {
+			srcID := d.fp + "::" + d.name
+			for _, tgt := range ad {
+				if tgt.fp == fp { // skip same file — handled by co-location
+					continue
+				}
+				if tgt.name == d.name || len(tgt.name) <= 4 {
+					continue
+				}
+				ek := srcID + "->" + tgt.fp + "::" + tgt.name
+				if seen[ek] {
+					continue
+				}
+				if matchGoTypeRef(cs, tgt.name) {
+					tgtID := tgt.fp + "::" + tgt.name
+					outgoing[srcID] = append(outgoing[srcID], candidate{tgtID, nodeScores[tgtID]})
+					seen[ek] = true
+				}
+			}
+		}
+	}
+
+	// Strategy 2: Co-location — declarations in the same file are related
+	for _, nodesInFile := range fileNodes {
+		if len(nodesInFile) < 2 || len(nodesInFile) > 20 {
+			continue
+		}
+		for i, src := range nodesInFile {
+			srcID := src.fp + "::" + src.name
+			for j, tgt := range nodesInFile {
+				if i == j || tgt.name == src.name {
+					continue
+				}
+				tgtID := tgt.fp + "::" + tgt.name
+				ek := srcID + "->" + tgtID
+				if !seen[ek] {
+					outgoing[srcID] = append(outgoing[srcID], candidate{tgtID, nodeScores[tgtID]})
+					seen[ek] = true
+				}
+			}
+		}
+	}
+
+	// Strategy 3: Proto service → message edges
+	// Connect proto services to request/response messages by name matching
+	for _, src := range ad {
+		if src.kind != parser.DeclService {
+			continue
+		}
+		cs := fileContents[src.fp]
+		if cs == "" {
+			continue
+		}
+		srcID := src.fp + "::" + src.name
 		for _, tgt := range ad {
-			if tgt.name == src.name {
+			if tgt.kind != parser.DeclMessage && tgt.kind != parser.DeclRPC {
 				continue
 			}
 			if len(tgt.name) <= 4 {
 				continue
 			}
-			ek := src.name + "->" + tgt.name
+			ek := srcID + "->" + tgt.fp + "::" + tgt.name
 			if seen[ek] {
 				continue
 			}
@@ -931,19 +1030,56 @@ func buildDeclGraph(ms *MicroserviceSummary, scores map[string]float64) gData {
 		}
 	}
 
+	// Strategy 4: Function call edges across files
+	// If funcA's file mentions funcB's name, create funcA → funcB edge
+	for _, src := range ad {
+		if src.kind != parser.DeclFunc {
+			continue
+		}
+		cs := fileContents[src.fp]
+		if cs == "" {
+			continue
+		}
+		srcID := src.fp + "::" + src.name
+		for _, tgt := range ad {
+			if tgt.kind != parser.DeclFunc || tgt.fp == src.fp || tgt.name == src.name {
+				continue
+			}
+			if len(tgt.name) <= 4 {
+				continue
+			}
+			ek := srcID + "->" + tgt.fp + "::" + tgt.name
+			if seen[ek] {
+				continue
+			}
+			if matchGoTypeRef(cs, tgt.name) {
+				tgtID := tgt.fp + "::" + tgt.name
+				outgoing[srcID] = append(outgoing[srcID], candidate{tgtID, nodeScores[tgtID]})
+				seen[ek] = true
+			}
+		}
+	}
+
+	// Cap outgoing edges per node
 	maxOutPerNode := 5
 	var links []gLink
 	for srcID, cands := range outgoing {
+		if !nodeSet[srcID] {
+			continue
+		}
 		sort.Slice(cands, func(i, j int) bool { return cands[i].tgtScore > cands[j].tgtScore })
 		limit := maxOutPerNode
 		if limit > len(cands) {
 			limit = len(cands)
 		}
 		for _, c := range cands[:limit] {
-			links = append(links, gLink{Source: srcID, Target: c.target})
+			if nodeSet[c.target] {
+				links = append(links, gLink{Source: srcID, Target: c.target})
+			}
 		}
 	}
 
+	// Global cap
 	maxEdges := len(nodes) * 3
 	if maxEdges < 10 {
 		maxEdges = 10
@@ -952,6 +1088,12 @@ func buildDeclGraph(ms *MicroserviceSummary, scores map[string]float64) gData {
 		links = links[:maxEdges]
 	}
 
+	if nodes == nil {
+		nodes = make([]gNode, 0)
+	}
+	if links == nil {
+		links = make([]gLink, 0)
+	}
 	return gData{Nodes: nodes, Links: links}
 }
 
