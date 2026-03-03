@@ -121,23 +121,52 @@ Create `.goscope.json` in your project root (or run `goscope init`):
 goscope/
 ├── go.mod
 ├── cmd/goscope/
-│   └── main.go              # CLI entry point
+│   └── main.go                  # CLI entry point
 ├── internal/
 │   ├── config/
-│   │   └── config.go        # Config models + loader
+│   │   └── config.go            # Config models + loader
 │   ├── scanner/
-│   │   └── scanner.go       # Directory walker, microservice detection, tech scanning
+│   │   ├── scanner.go           # Directory walker, scan orchestration
+│   │   ├── detect.go            # Service detection, microservice inference
+│   │   ├── techdetect.go        # Technology detection (docker-compose, go.mod, Makefile)
+│   │   └── scanner_test.go
 │   ├── parser/
-│   │   ├── models.go        # ParsedFile, Declaration, GitMetadata
-│   │   └── parser.go        # Go + Proto parsers
+│   │   ├── models.go            # ParsedFile, Declaration, GitMetadata
+│   │   ├── parser.go            # Go + Proto file parsers
+│   │   └── parser_test.go
 │   ├── git/
-│   │   └── analyzer.go      # Multi-repo batch git log analysis
+│   │   └── analyzer.go          # Multi-repo batch git log analysis
 │   ├── graph/
-│   │   ├── graph.go         # Dependency graph + PageRank
-│   │   └── util.go          # File helpers
+│   │   ├── graph.go             # Dependency graph + PageRank
+│   │   ├── util.go              # File helpers
+│   │   └── graph_test.go
 │   └── report/
-│       └── report.go        # HTML report generator
+│       ├── report.go            # HTML report generator (Generate)
+│       ├── graphs.go            # Architecture + declaration graph builders
+│       ├── helpers.go           # Formatting, escaping, tech detection
+│       └── helpers_test.go
 └── README.md
+```
+
+---
+
+## 🧪 Testing
+
+```bash
+# Run all tests
+go test ./...
+
+# Run tests with verbose output
+go test -v ./...
+
+# Run specific package tests
+go test -v ./internal/parser/
+go test -v ./internal/scanner/
+go test -v ./internal/graph/
+go test -v ./internal/report/
+
+# Run a specific test
+go test -v -run TestMatchGoTypeRef ./internal/report/
 ```
 
 ---
