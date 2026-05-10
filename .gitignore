@@ -32,3 +32,4 @@ go.work.sum
 # .vscode/
 output
 output2
+goscope
