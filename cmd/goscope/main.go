@@ -242,7 +242,10 @@ func runAnalyze(path string, verbose, openBrowser bool) {
 	os.MkdirAll(outputDir, 0755)
 	reportPath := filepath.Join(outputDir, "index.html")
 
-	projectName := filepath.Base(absPath)
+	projectName := cfg.ProjectName
+	if projectName == "" {
+		projectName = filepath.Base(absPath)
+	}
 	if err := report.Generate(g, reportPath, parsedFiles, branchName, authorStats,
 		projectName, technologies, dockerServices, scanResult.RootSubdirs,
 		scanResult.ForeignServices); err != nil {

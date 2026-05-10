@@ -7,6 +7,7 @@ import (
 )
 
 type Config struct {
+	ProjectName     string   `json:"project_name"`
 	ExcludePaths    []string `json:"excludePaths"`
 	MaxFilesAnalyze int      `json:"maxFilesAnalyze"`
 	GitCommitLimit  int      `json:"gitCommitLimit"`
@@ -20,6 +21,7 @@ const DefaultConfigPath = ".goscope.json"
 
 func DefaultConfig() Config {
 	return Config{
+		ProjectName: "",
 		ExcludePaths: []string{
 			".git", ".build", "node_modules", "vendor", "dist",
 			"build", ".idea", ".vscode", "__pycache__", ".cache",
