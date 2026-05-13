@@ -236,7 +236,12 @@ func Generate(
 		techTags += fmt.Sprintf("<span class='tag %s'>%s</span> ", cls, esc(t))
 	}
 
-	// ─── 2b. Architecture graph ───
+	// ─── 2b. Architecture layers + components ───
+	archLayersHTML := buildArchLayersHTML(files)
+	archComponents := detectGoComponents(files, techSet, totalServices, totalRPCs)
+	archComponentsHTML := buildArchComponentsHTML(archComponents)
+
+	// ─── 2c. Architecture graph ───
 	archGraph := buildArchitectureGraph(microservices, techList, files, foreignServices)
 	archGraphJSON, _ := json.Marshal(archGraph)
 
@@ -588,8 +593,19 @@ h3{color:var(--text2);font-size:16px;margin:20px 0 8px 0;}
 .decl-tags{font-size:12px;line-height:1.8;}
 .pkg-graph-container{width:100%%;height:420px;border:1px solid var(--border);border-radius:10px;margin-bottom:16px;overflow:hidden;background:#fafafa;}
 .arch-graph-container{width:100%%;height:500px;border:1px solid var(--border);border-radius:10px;margin-bottom:16px;overflow:hidden;background:#fafafa;}
+.arch-block{margin-top:12px;}.arch-cols{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:20px;}
+.arch-col h4{font-size:13px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.05em;margin:0 0 10px 0;}
+.arch-layers{display:flex;flex-direction:column;gap:6px;}.arch-layer{display:flex;flex-direction:column;gap:2px;}
+.layer-bar-row{display:flex;align-items:center;gap:6px;font-size:12px;}.layer-icon{font-size:14px;flex-shrink:0;}
+.layer-name{flex:1;color:var(--text2);}.layer-count{color:var(--text3);font-size:11px;white-space:nowrap;}
+.layer-bar-track{height:4px;background:var(--border);border-radius:2px;overflow:hidden;}
+.layer-bar-fill{height:100%%;background:var(--accent);border-radius:2px;}
+.arch-components{display:flex;flex-direction:column;gap:6px;}
+.arch-component{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text2);}
+.comp-icon{font-size:16px;flex-shrink:0;}
 .table-wrap{width:100%%;overflow-x:auto;-webkit-overflow-scrolling:touch;}
-@media(max-width:768px){body{padding:8px;}.card{padding:14px;border-radius:12px;}.summary-grid{grid-template-columns:repeat(3,1fr);gap:6px;}.summary-card{padding:10px 4px;}.summary-card .num{font-size:18px;}.summary-card .label{font-size:9px;}h1{font-size:20px;}h2{font-size:17px;}.team-table,.file-table{font-size:12px;min-width:500px;}.pkg-grid{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));}.pkg-graph-container,.arch-graph-container{height:300px;}}
+@media(max-width:900px){.arch-cols{grid-template-columns:1fr 1fr;}}
+@media(max-width:768px){body{padding:8px;}.card{padding:14px;border-radius:12px;}.summary-grid{grid-template-columns:repeat(3,1fr);gap:6px;}.summary-card{padding:10px 4px;}.summary-card .num{font-size:18px;}.summary-card .label{font-size:9px;}h1{font-size:20px;}h2{font-size:17px;}.team-table,.file-table{font-size:12px;min-width:500px;}.pkg-grid{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));}.pkg-graph-container,.arch-graph-container{height:300px;}.arch-cols{grid-template-columns:1fr;}}
 </style>
 <script src="https://unpkg.com/d3-force@3"></script>
 <script src="https://unpkg.com/force-graph"></script>
@@ -619,12 +635,14 @@ h3{color:var(--text2);font-size:16px;margin:20px 0 8px 0;}
 %s
 
 <div class="card">
-<h2>📚 Tech Stack</h2>
-<h3>Technologies</h3>
-<div class="tag-cloud">%s</div>
-<h3 style="margin-top:20px">Microservices <span class="count">(%d)</span></h3>
-<div class="pkg-grid">%s</div>
-<h3 style="margin-top:24px">Architecture</h3>
+<h2>🏛️ Architecture</h2>
+<div class="arch-block"><div class="arch-cols">
+<div class="arch-col arch-col-layers"><h4>Layers</h4>%s</div>
+<div class="arch-col arch-col-components"><h4>Components</h4>%s</div>
+<div class="arch-col arch-col-tech"><h4>Technologies</h4><div class="tag-cloud">%s</div></div>
+<div class="arch-col arch-col-modules"><h4>Microservices <span class="count">(%d)</span></h4><div class="pkg-grid">%s</div></div>
+</div></div>
+<h3 style="margin-top:24px">Architecture Graph</h3>
 <div id="arch-graph" class="arch-graph-container"></div>
 </div>
 
@@ -707,6 +725,8 @@ g.d3Force('charge').strength(-200);g.d3Force('link').distance(90);g.d3Force('x',
 </div>`, teamRows.String())
 		}(),
 		// Tech Stack
+		archLayersHTML,
+		archComponentsHTML,
 		techTags,
 		totalMSCount,
 		msGridHTML.String(),
