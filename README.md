@@ -15,7 +15,7 @@ go run ./cmd/goscope ~/backend --open
 
 Where `~/backend` is the **parent folder** where all your backend service repositories are cloned:
 
-```
+```text
 ~/backend/
 ├── api-gateway/      ← cloned repo (.git inside)
 ├── user-service/     ← cloned repo
@@ -35,12 +35,17 @@ Services are auto-detected up to 3 levels deep, so layouts like `src/<service>/`
 
 1. **📊 Summary** — microservice count, Go files, lines of code, declarations by type (structs, interfaces, enums, functions), proto files, gRPC services. Non-Go services detected in the repo tree get line count cards per language (Python, Java, etc.)
 
-2. **👥 Team Contribution Map** — developer activity with files modified, commit counts, first/last change dates, and **top-3 microservices** per author. Git history is collected from each cloned repo's `.git` independently
+2. **🐙 Git Analysis** — three sub-sections pulled from each cloned repo's `.git` independently:
+   - **👥 Team Contribution Map** — per-developer: files modified, commit count, LOC per commit, first/last change date, and top-3 microservices worked on
+   - **🔥 Code Churn** — most frequently modified files across all repos, with change count and top authors
+   - **📐 Semantic Standards** — semver tag adoption rate (with latest tag), conventional commit coverage with a type breakdown (`feat`, `fix`, `chore`, `refactor`, `docs`, `test`, …), and samples of non-standard commit messages
 
-3. **📚 Tech Stack** — three subsections:
-   - **Technologies** — auto-detected from Go imports (`pgx` → PostgreSQL, `sarama` → Kafka, etc.), `go.mod` dependencies, `docker-compose.yml` images/ports, and `Makefile` hints. Non-Go languages shown with orange badges
-   - **Microservices** — clickable grid of all detected microservices, including non-Go services with language badges
-   - **Architecture** — interactive force-directed graph showing how microservices connect to technologies
+3. **🏛️ Architecture** — four-column layout plus an interactive graph:
+   - **Layers** — detected architectural layers (API, service, repository, etc.) with file counts and a proportional bar
+   - **Components** — identified Go components (HTTP server, gRPC server, message queue consumer, etc.)
+   - **Technologies** — auto-detected from Go imports (`pgx` → PostgreSQL, `sarama` → Kafka, etc.), `go.mod`, `docker-compose.yml`, and `Makefile`. Non-Go languages shown with orange badges
+   - **Microservices** — clickable grid of all services including non-Go ones with language/LOC badges
+   - **Architecture Graph** — interactive force-directed graph connecting microservices to their technologies
 
 4. **🔗 Microservices Penetration** — which microservice is imported by the most other microservices, plus TODO/FIXME density per microservice
 
@@ -48,7 +53,12 @@ Services are auto-detected up to 3 levels deep, so layouts like `src/<service>/`
 
 6. **📏 Longest Functions** — ranked list of functions by line count, with clickable microservice badges
 
-7. **🔧 Microservices** — detailed breakdown of each microservice (starting with API Gateway, then Proto, then by size):
+7. **⚠️ Anti-patterns** — static analysis across the codebase with 22 Go-specific checks grouped by severity. Passed checks shown in a compact 3-column grid; failed checks listed with file locations, code snippets, and git-blame author attribution. Protobuf-generated files (`.pb.go`) are excluded automatically. Checks include:
+   - **HIGH** — hardcoded secrets, SQL injection via string concatenation, `math/rand` for security, `panic()` in business logic, unsafe type assertions, unclosed HTTP response bodies, loop variable capture in goroutines, copying `sync.Mutex`
+   - **MEDIUM** — error not wrapped with `%w`, defer inside loops, missing `rows.Err()` / `rows.Close()`, `time.Sleep` for goroutine sync
+   - **LOW** — large channel buffers, naked returns, pointer-to-interface, missing slice pre-allocation, package underscore naming, `init()` functions, `fmt.Sprintf` for integer conversion, `[]byte` conversion in loops
+
+8. **🔧 Microservices** — detailed breakdown of each microservice (starting with API Gateway, then Proto, then by size):
    - Complete file inventory sorted by lines of code
    - Declaration statistics (structs, interfaces, enums, funcs, gRPC services/RPCs)
    - Interactive force-directed dependency graph per microservice (includes big functions ≥50 lines)
@@ -117,7 +127,7 @@ Create `.goscope.json` in your project root (or run `goscope init`):
 
 ## 📁 Project Structure
 
-```
+```text
 goscope/
 ├── go.mod
 ├── cmd/goscope/
@@ -142,6 +152,7 @@ goscope/
 │   │   └── graph_test.go
 │   └── report/
 │       ├── report.go            # HTML report generator (Generate)
+│       ├── antipatterns.go      # 22 Go anti-pattern checks + HTML builder
 │       ├── graphs.go            # Architecture + declaration graph builders
 │       ├── helpers.go           # Formatting, escaping, tech detection
 │       └── helpers_test.go

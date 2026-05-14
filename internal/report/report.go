@@ -67,6 +67,10 @@ func Generate(
 	dockerServices []string,
 	rootSubdirs []string,
 	foreignServices []scanner.ForeignService,
+	gitRepos []string,
+	churnStats []gitpkg.FileChurnStat,
+	tagStats gitpkg.TagStats,
+	commitStats gitpkg.CommitStats,
 ) error {
 	fmt.Println("   Generating HTML sections...")
 
@@ -191,10 +195,82 @@ func Generate(
 			anchor := strings.ReplaceAll(ms, " ", "-")
 			top3html += fmt.Sprintf("<a href='#ms-%s' class='tag tag-local pkg-link-inline' style='font-size:11px'>%s</a> ", anchor, esc(ms))
 		}
+		locPerCommit := "—"
+		if ae.Stats.TotalCommits > 0 && ae.Stats.TotalLOCAdded > 0 {
+			locPerCommit = fmtNum(ae.Stats.TotalLOCAdded / ae.Stats.TotalCommits)
+		}
 		teamRows.WriteString(fmt.Sprintf(
-			"<tr><td>%s</td><td>%d</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td></tr>\n",
-			esc(ae.Name), ae.Stats.FilesModified, ae.Stats.TotalCommits, first, last, top3html,
+			"<tr><td>%s</td><td>%d</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n",
+			esc(ae.Name), ae.Stats.FilesModified, ae.Stats.TotalCommits, locPerCommit, first, last, top3html,
 		))
+	}
+
+	// ─── 1b. Code Churn ───
+	var churnRows strings.Builder
+	for _, cs := range churnStats {
+		displayPath := cs.RelPath
+		parts := strings.Split(strings.ReplaceAll(displayPath, "\\", "/"), "/")
+		if len(parts) > 4 {
+			displayPath = "…/" + strings.Join(parts[len(parts)-3:], "/")
+		}
+		authorsHTML := ""
+		for _, a := range cs.TopAuthors {
+			authorsHTML += fmt.Sprintf(`<span class="bs-badge" style="margin-right:3px">%s</span>`, esc(a))
+		}
+		churnRows.WriteString(fmt.Sprintf(
+			"<tr><td class='mono' style='font-size:12px'>%s</td><td class='mono'>%d</td><td>%s</td></tr>\n",
+			esc(displayPath), cs.ChangeCount, authorsHTML,
+		))
+	}
+
+	// ─── 1c. Semantic Standards ───
+	var semHTML strings.Builder
+	// Semver tags
+	semverPct := 0
+	if tagStats.TotalTags > 0 {
+		semverPct = tagStats.SemverTags * 100 / tagStats.TotalTags
+	}
+	semTagLabel := "No tags found"
+	if tagStats.TotalTags > 0 {
+		semTagLabel = fmt.Sprintf("%d / %d tags follow semver", tagStats.SemverTags, tagStats.TotalTags)
+		if tagStats.LatestSemver != "" {
+			semTagLabel += fmt.Sprintf(" · latest: <strong>%s</strong>", esc(tagStats.LatestSemver))
+		}
+	}
+	semHTML.WriteString(fmt.Sprintf(
+		`<div class="sem-row"><span class="sem-label">🏷️ Semver Tags</span><span class="sem-bar-wrap"><span class="sem-bar" style="width:%d%%"></span></span><span class="sem-stat">%s</span></div>`,
+		semverPct, semTagLabel,
+	))
+	// Conventional commits
+	convPct := 0
+	if commitStats.Total > 0 {
+		convPct = commitStats.Typed * 100 / commitStats.Total
+	}
+	semHTML.WriteString(fmt.Sprintf(
+		`<div class="sem-row"><span class="sem-label">📝 Conv. Commits</span><span class="sem-bar-wrap"><span class="sem-bar" style="width:%d%%"></span></span><span class="sem-stat">%d / %d structured</span></div>`,
+		convPct, commitStats.Typed, commitStats.Total,
+	))
+	// Type breakdown
+	if len(commitStats.TypeCounts) > 0 {
+		semHTML.WriteString(`<div class="sem-type-row">`)
+		typeOrder := []string{"feat", "fix", "chore", "refactor", "docs", "test", "perf", "ci", "build", "revert", "ticket"}
+		for _, t := range typeOrder {
+			if n, ok := commitStats.TypeCounts[t]; ok {
+				label := t
+				if t == "ticket" {
+					label = "#ticket"
+				}
+				semHTML.WriteString(fmt.Sprintf(`<span class="sem-type-badge">%s <strong>%d</strong></span>`, esc(label), n))
+			}
+		}
+		semHTML.WriteString(`</div>`)
+	}
+	if len(commitStats.Samples) > 0 {
+		semHTML.WriteString(`<div class="sem-samples"><span style="color:var(--text3);font-size:11px;font-weight:600">Non-standard samples:</span>`)
+		for _, s := range commitStats.Samples {
+			semHTML.WriteString(fmt.Sprintf(`<div class="sem-sample">%s</div>`, esc(s)))
+		}
+		semHTML.WriteString(`</div>`)
 	}
 
 	// ─── 2. Tech Stack: Technologies ───
@@ -240,6 +316,11 @@ func Generate(
 	archLayersHTML := buildArchLayersHTML(files)
 	archComponents := detectGoComponents(files, techSet, totalServices, totalRPCs)
 	archComponentsHTML := buildArchComponentsHTML(archComponents)
+
+	// ─── 2b+. Anti-patterns ───
+	fmt.Println("   Running anti-pattern checks...")
+	apResults := runAntipatterns(files, gitRepos)
+	apCardHTML := buildAntipatternHTML(apResults)
 
 	// ─── 2c. Architecture graph ───
 	archGraph := buildArchitectureGraph(microservices, techList, files, foreignServices)
@@ -554,7 +635,7 @@ g.d3Force('charge').strength(-120);g.d3Force('link').distance(50);g.d3Force('x',
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔬</text></svg>">
 <title>🔬 goscope — %s</title>
 <style>
-:root{--bg:#f5f5f7;--card:#fff;--border:#e5e5ea;--text:#1d1d1f;--text2:#424245;--text3:#86868b;--accent:#0071e3;--red:#ff3b30;}
+:root{--bg:#f5f5f7;--card:#fff;--border:#e5e5ea;--text:#1d1d1f;--text2:#424245;--text3:#86868b;--accent:#0071e3;--red:#ff3b30;--green:#34c759;}
 *{box-sizing:border-box;}
 body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','Helvetica Neue',sans-serif;margin:0;padding:20px;background:var(--bg);color:var(--text);line-height:1.5;}
 .container{max-width:1280px;margin:0 auto;}
@@ -603,8 +684,47 @@ h3{color:var(--text2);font-size:16px;margin:20px 0 8px 0;}
 .arch-components{display:flex;flex-direction:column;gap:6px;}
 .arch-component{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text2);}
 .comp-icon{font-size:16px;flex-shrink:0;}
+.ap-summary{margin-bottom:16px;display:flex;gap:12px;align-items:center;}
+.ap-fail-badge{background:#fff0f0;color:var(--red);padding:4px 12px;border-radius:8px;font-weight:600;font-size:14px;}
+.ap-pass-badge{background:#f0fff4;color:#34c759;padding:4px 12px;border-radius:8px;font-weight:600;font-size:14px;}
+.ap-passed-list{display:flex;flex-wrap:wrap;gap:6px;}
+.ap-passed-item{display:flex;align-items:center;gap:4px;font-size:13px;color:var(--text3);}
+.ap-lang-badge{padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase;background:#e8f5e9;color:#2e7d32;}
+.ap-lang-badge-go{background:#e3f2fd;color:#1565c0;}
+.ap-priority{padding:1px 6px;border-radius:4px;font-size:10px;font-weight:700;text-transform:uppercase;}
+.ap-pri-high{background:#ffeaea;color:#c62828;}
+.ap-pri-med{background:#fff3e0;color:#e65100;}
+.ap-pri-low{background:#fffde7;color:#f57f17;}
+.ap-check{margin-bottom:16px;border:1px solid #ffeaea;border-radius:10px;overflow:hidden;}
+.ap-check-header{background:#fff8f8;padding:10px 14px;display:flex;align-items:center;gap:8px;}
+.ap-check-title{font-weight:600;font-size:14px;flex:1;}
+.ap-check-count{color:var(--red);font-size:12px;font-weight:500;}
+.ap-violations{padding:10px 14px;}
+.ap-check-desc-text{font-size:12px;color:var(--text3);margin-bottom:8px;line-height:1.6;}
+.ap-cols{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;align-items:start;margin-bottom:16px;}
+.ap-col{}
+.ap-col-header{font-size:13px;font-weight:700;margin:0 0 12px 0;padding-bottom:8px;border-bottom:2px solid #eee;}
+.ap-col-high .ap-col-header{color:#c62828;border-color:#ffeaea;}
+.ap-col-med .ap-col-header{color:#e65100;border-color:#fff3e0;}
+.ap-col-low .ap-col-header{color:#f57f17;border-color:#fffde7;}
+.ap-violation{display:flex;gap:6px;margin-bottom:4px;font-size:12px;overflow:hidden;align-items:center;}
+.ap-file{font-family:'SF Mono',Menlo,monospace;color:var(--accent);flex-shrink:0;}
+.ap-snippet{font-family:'SF Mono',Menlo,monospace;color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;}
+.ap-author-badge{margin-left:auto;flex-shrink:0;background:#e3f2fd;color:#1565c0;font-size:10px;padding:1px 5px;border-radius:4px;white-space:nowrap;}
+.sub-card{border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:16px;}
+.sub-card:last-child{margin-bottom:0;}
+.sub-card-title{font-size:15px;font-weight:600;margin:0 0 12px 0;color:var(--text);}
+.sem-row{display:flex;align-items:center;gap:10px;margin-bottom:10px;font-size:13px;}
+.sem-label{width:160px;flex-shrink:0;color:var(--text2);font-weight:500;}
+.sem-bar-wrap{flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden;}
+.sem-bar{display:block;height:100%%;background:var(--accent);border-radius:3px;}
+.sem-stat{color:var(--text3);font-size:12px;white-space:nowrap;}
+.sem-type-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;}
+.sem-type-badge{background:#f0f4ff;color:#1565c0;border-radius:6px;padding:3px 8px;font-size:12px;}
+.sem-samples{margin-top:8px;border-top:1px solid var(--border);padding-top:8px;}
+.sem-sample{font-family:'SF Mono',Menlo,monospace;font-size:11px;color:var(--text3);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .table-wrap{width:100%%;overflow-x:auto;-webkit-overflow-scrolling:touch;}
-@media(max-width:900px){.arch-cols{grid-template-columns:1fr 1fr;}}
+@media(max-width:900px){.arch-cols{grid-template-columns:1fr 1fr;}.ap-cols{grid-template-columns:1fr;}}
 @media(max-width:768px){body{padding:8px;}.card{padding:14px;border-radius:12px;}.summary-grid{grid-template-columns:repeat(3,1fr);gap:6px;}.summary-card{padding:10px 4px;}.summary-card .num{font-size:18px;}.summary-card .label{font-size:9px;}h1{font-size:20px;}h2{font-size:17px;}.team-table,.file-table{font-size:12px;min-width:500px;}.pkg-grid{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));}.pkg-graph-container,.arch-graph-container{height:300px;}.arch-cols{grid-template-columns:1fr;}}
 </style>
 <script src="https://unpkg.com/d3-force@3"></script>
@@ -635,7 +755,7 @@ h3{color:var(--text2);font-size:16px;margin:20px 0 8px 0;}
 %s
 
 <div class="card">
-<h2>🏛️ Architecture</h2>
+<h2>🏛️ Architecture </h2>
 <div class="arch-block"><div class="arch-cols">
 <div class="arch-col arch-col-layers"><h4>Layers</h4>%s</div>
 <div class="arch-col arch-col-components"><h4>Components</h4>%s</div>
@@ -656,6 +776,10 @@ h3{color:var(--text2);font-size:16px;margin:20px 0 8px 0;}
 %s
 
 %s
+
+<div class="card">
+%s
+</div>
 
 <div class="card">
 <h2>🔧 Microservices</h2>
@@ -711,18 +835,36 @@ g.d3Force('charge').strength(-200);g.d3Force('link').distance(90);g.d3Force('x',
 		protoCard,
 		grpcCard,
 		foreignLangCards,
-		// Team (only if git data exists)
+		// Git Analysis card (only if git data exists)
 		func() string {
-			if len(teamEntries) == 0 {
+			if len(teamEntries) == 0 && len(churnStats) == 0 && tagStats.TotalTags == 0 && commitStats.Total == 0 {
 				return ""
 			}
-			return fmt.Sprintf(`<div class="card">
-<h2>👥 Team Contribution Map</h2>
-<div class="table-wrap"><table class="team-table">
-<thead><tr><th>Developer</th><th>Files Modified</th><th>Commits</th><th>First Change</th><th>Last Change</th><th>Top-3 Microservices</th></tr></thead>
-<tbody>%s</tbody>
-</table></div>
-</div>`, teamRows.String())
+			var out strings.Builder
+			out.WriteString(`<div class="card"><h2>🐙 Git Analysis</h2>`)
+			// Sub-card 1: Team Contribution Map
+			if len(teamEntries) > 0 {
+				out.WriteString(`<div class="sub-card"><h3 class="sub-card-title">👥 Team Contribution Map</h3>`)
+				out.WriteString(`<div class="table-wrap"><table class="team-table">`)
+				out.WriteString(`<thead><tr><th>Developer</th><th>Files Modified</th><th>Commits</th><th>LOC / Commit</th><th>First Change</th><th>Last Change</th><th>Top-3 Microservices</th></tr></thead>`)
+				out.WriteString(fmt.Sprintf(`<tbody>%s</tbody></table></div></div>`, teamRows.String()))
+			}
+			// Sub-card 2: Code Churn
+			if churnRows.Len() > 0 {
+				out.WriteString(`<div class="sub-card"><h3 class="sub-card-title">🔥 Code Churn</h3>`)
+				out.WriteString(`<p class="subtitle" style="margin-bottom:10px">Most frequently modified files across all repos.</p>`)
+				out.WriteString(`<div class="table-wrap"><table class="file-table">`)
+				out.WriteString(`<thead><tr><th>File</th><th>Changes</th><th>Top Authors</th></tr></thead>`)
+				out.WriteString(fmt.Sprintf(`<tbody>%s</tbody></table></div></div>`, churnRows.String()))
+			}
+			// Sub-card 3: Semantic Standards
+			if tagStats.TotalTags > 0 || commitStats.Total > 0 {
+				out.WriteString(`<div class="sub-card"><h3 class="sub-card-title">📐 Semantic Standards</h3>`)
+				out.WriteString(semHTML.String())
+				out.WriteString(`</div>`)
+			}
+			out.WriteString(`</div>`)
+			return out.String()
 		}(),
 		// Tech Stack
 		archLayersHTML,
@@ -776,6 +918,8 @@ g.d3Force('charge').strength(-200);g.d3Force('link').distance(90);g.d3Force('x',
 </table></div>
 </div>`, funcRows.String())
 		}(),
+		// Anti-patterns card
+		apCardHTML,
 		// Microservice sections
 		msSections.String(),
 		// Architecture graph JSON
