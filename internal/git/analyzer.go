@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/goscope/internal/parser"
 )
@@ -44,6 +45,27 @@ type CommitStats struct {
 	Typed      int
 	TypeCounts map[string]int
 	Samples    []string // sample non-conventional messages
+}
+
+// BranchInfo holds data for a single local branch.
+type BranchInfo struct {
+	Name         string
+	LastActivity float64 // unix timestamp
+	DaysInactive int
+}
+
+// BranchStats holds branch management metrics.
+type BranchStats struct {
+	TotalBranches      int
+	StaleBranches      []BranchInfo
+	StaleThresholdDays int
+	AvgLifetimeDays    float64 // avg time from first to last commit in merged branches
+	AvgTTMDays         float64 // avg time from first branch commit to merge
+	AvgIntegDelayHours float64 // avg time from last branch commit to merge (review delay)
+	MaxDepth           int     // max nesting depth inferred from branch names
+	RollbackCount      int
+	TotalMainCommits   int
+	PeakCommitDay      string // day of week with the most commits
 }
 
 // GitSummary bundles all git data produced for a report.
@@ -553,4 +575,180 @@ func isHexChars(s string) bool {
 		}
 	}
 	return true
+}
+
+func (a *Analyzer) defaultMainBranch() string {
+	for _, name := range []string{"main", "master"} {
+		out := a.git(a.RepoPath, "rev-parse", "--verify", name)
+		if strings.TrimSpace(out) != "" {
+			return name
+		}
+	}
+	return "HEAD"
+}
+
+// GetBranchStats collects branch management metrics across all repos.
+func GetBranchStats(gitRepos []string, staleDays int) BranchStats {
+	var bs BranchStats
+	bs.StaleThresholdDays = staleDays
+	if bs.StaleThresholdDays <= 0 {
+		bs.StaleThresholdDays = 30
+	}
+
+	now := float64(time.Now().Unix())
+	threshold := now - float64(bs.StaleThresholdDays)*86400
+	seenBranch := make(map[string]bool)
+	skipNames := map[string]bool{"main": true, "master": true, "develop": true, "HEAD": true}
+
+	var lifetimes, ttms, integDelays []float64
+	dayCounts := make(map[time.Weekday]int)
+
+	for _, repo := range gitRepos {
+		a := &Analyzer{RepoPath: repo}
+		mainBranch := a.defaultMainBranch()
+
+		// 1. Branch inventory: stale detection + depth from naming
+		branchOut := a.git(repo, "for-each-ref",
+			"--format=%(refname:short)\t%(committerdate:unix)",
+			"refs/heads/")
+		for _, line := range strings.Split(strings.TrimSpace(branchOut), "\n") {
+			parts := strings.SplitN(line, "\t", 2)
+			if len(parts) < 2 {
+				continue
+			}
+			name := strings.TrimSpace(parts[0])
+			ts, _ := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+			if name == "" || seenBranch[name] {
+				continue
+			}
+			seenBranch[name] = true
+			bs.TotalBranches++
+
+			// Depth from slash-delimited name parts (e.g. feature/team/x → 3)
+			if depth := strings.Count(name, "/") + 1; depth > bs.MaxDepth {
+				bs.MaxDepth = depth
+			}
+
+			if !skipNames[name] && ts > 0 && ts < threshold {
+				bs.StaleBranches = append(bs.StaleBranches, BranchInfo{
+					Name:         name,
+					LastActivity: ts,
+					DaysInactive: int((now - ts) / 86400),
+				})
+			}
+		}
+
+		// 2. Merge analysis: TTM, Lifetime, Integration Delay
+		// Format: "<merge-ts> <first-parent> <second-parent>"
+		mergeOut := a.git(repo, "log", mainBranch, "--merges",
+			"-50", "--pretty=format:%at %P")
+		for _, line := range strings.Split(strings.TrimSpace(mergeOut), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 3 {
+				continue
+			}
+			mergeTs, err := strconv.ParseFloat(fields[0], 64)
+			if err != nil || mergeTs <= 0 {
+				continue
+			}
+			mainParent := fields[1]
+			featureTip := fields[2]
+
+			// Timestamps of all commits on the feature branch not reachable from main
+			featureLog := a.git(repo, "log",
+				fmt.Sprintf("%s..%s", mainParent, featureTip),
+				"--pretty=format:%at")
+			if featureLog == "" {
+				continue
+			}
+			var timestamps []float64
+			for _, tsStr := range strings.Split(strings.TrimSpace(featureLog), "\n") {
+				ts, err := strconv.ParseFloat(strings.TrimSpace(tsStr), 64)
+				if err == nil && ts > 0 {
+					timestamps = append(timestamps, ts)
+				}
+			}
+			if len(timestamps) == 0 {
+				continue
+			}
+
+			minTs, maxTs := timestamps[0], timestamps[0]
+			for _, ts := range timestamps[1:] {
+				if ts < minTs {
+					minTs = ts
+				}
+				if ts > maxTs {
+					maxTs = ts
+				}
+			}
+
+			if d := (maxTs - minTs) / 86400; d >= 0 && d < 365 {
+				lifetimes = append(lifetimes, d)
+			}
+			if d := (mergeTs - minTs) / 86400; d >= 0 && d < 730 {
+				ttms = append(ttms, d)
+			}
+			if h := (mergeTs - maxTs) / 3600; h >= 0 && h < 8760 {
+				integDelays = append(integDelays, h)
+			}
+		}
+
+		// 3. Rollback rate on main
+		rollbackOut := a.git(repo, "log", mainBranch,
+			"--pretty=format:%H", "--grep=revert", "--grep=rollback", "-i")
+		for _, h := range strings.Split(strings.TrimSpace(rollbackOut), "\n") {
+			if strings.TrimSpace(h) != "" {
+				bs.RollbackCount++
+			}
+		}
+
+		// 4. Peak commit day: tally all commit timestamps across all branches
+		dayOut := a.git(repo, "log", "--all",
+			fmt.Sprintf("-%d", 2000), "--pretty=format:%at")
+		for _, line := range strings.Split(strings.TrimSpace(dayOut), "\n") {
+			ts, err := strconv.ParseFloat(strings.TrimSpace(line), 64)
+			if err != nil || ts <= 0 {
+				continue
+			}
+			weekday := time.Unix(int64(ts), 0).UTC().Weekday()
+			dayCounts[weekday]++
+		}
+
+		countOut := a.git(repo, "rev-list", "--count", mainBranch)
+		n, _ := strconv.Atoi(strings.TrimSpace(countOut))
+		bs.TotalMainCommits += n
+	}
+
+	avg := func(vals []float64) float64 {
+		if len(vals) == 0 {
+			return 0
+		}
+		sum := 0.0
+		for _, v := range vals {
+			sum += v
+		}
+		return sum / float64(len(vals))
+	}
+	bs.AvgLifetimeDays = avg(lifetimes)
+	bs.AvgTTMDays = avg(ttms)
+	bs.AvgIntegDelayHours = avg(integDelays)
+
+	peakDay, peakCount := time.Sunday, 0
+	for day, count := range dayCounts {
+		if count > peakCount {
+			peakCount = count
+			peakDay = day
+		}
+	}
+	if peakCount > 0 {
+		bs.PeakCommitDay = peakDay.String()
+	}
+
+	sort.Slice(bs.StaleBranches, func(i, j int) bool {
+		return bs.StaleBranches[i].DaysInactive > bs.StaleBranches[j].DaysInactive
+	})
+	if len(bs.StaleBranches) > 20 {
+		bs.StaleBranches = bs.StaleBranches[:20]
+	}
+	return bs
 }

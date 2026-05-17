@@ -71,6 +71,7 @@ func Generate(
 	churnStats []gitpkg.FileChurnStat,
 	tagStats gitpkg.TagStats,
 	commitStats gitpkg.CommitStats,
+	branchStats gitpkg.BranchStats,
 ) error {
 	fmt.Println("   Generating HTML sections...")
 
@@ -724,6 +725,10 @@ h3{color:var(--text2);font-size:16px;margin:20px 0 8px 0;}
 .sem-samples{margin-top:8px;border-top:1px solid var(--border);padding-top:8px;}
 .sem-sample{font-family:'SF Mono',Menlo,monospace;font-size:11px;color:var(--text3);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .table-wrap{width:100%%;overflow-x:auto;-webkit-overflow-scrolling:touch;}
+.bm-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:16px;}
+.bm-card{background:var(--bg);border-radius:10px;padding:12px;text-align:center;}
+.bm-value{font-size:22px;font-weight:700;color:var(--accent);}
+.bm-label{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.04em;margin-top:2px;}
 @media(max-width:900px){.arch-cols{grid-template-columns:1fr 1fr;}.ap-cols{grid-template-columns:1fr;}}
 @media(max-width:768px){body{padding:8px;}.card{padding:14px;border-radius:12px;}.summary-grid{grid-template-columns:repeat(3,1fr);gap:6px;}.summary-card{padding:10px 4px;}.summary-card .num{font-size:18px;}.summary-card .label{font-size:9px;}h1{font-size:20px;}h2{font-size:17px;}.team-table,.file-table{font-size:12px;min-width:500px;}.pkg-grid{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));}.pkg-graph-container,.arch-graph-container{height:300px;}.arch-cols{grid-template-columns:1fr;}}
 </style>
@@ -849,7 +854,13 @@ g.d3Force('charge').strength(-200);g.d3Force('link').distance(90);g.d3Force('x',
 				out.WriteString(`<thead><tr><th>Developer</th><th>Files Modified</th><th>Commits</th><th>LOC / Commit</th><th>First Change</th><th>Last Change</th><th>Top-3 Microservices</th></tr></thead>`)
 				out.WriteString(fmt.Sprintf(`<tbody>%s</tbody></table></div></div>`, teamRows.String()))
 			}
-			// Sub-card 2: Code Churn
+			// Sub-card 2: Branch Management
+			if bmHTML := buildBranchManagementHTML(branchStats); bmHTML != "" {
+				out.WriteString(`<div class="sub-card"><h3 class="sub-card-title">🌿 Branch Management</h3>`)
+				out.WriteString(bmHTML)
+				out.WriteString(`</div>`)
+			}
+			// Sub-card 3: Code Churn
 			if churnRows.Len() > 0 {
 				out.WriteString(`<div class="sub-card"><h3 class="sub-card-title">🔥 Code Churn</h3>`)
 				out.WriteString(`<p class="subtitle" style="margin-bottom:10px">Most frequently modified files across all repos.</p>`)
@@ -857,7 +868,7 @@ g.d3Force('charge').strength(-200);g.d3Force('link').distance(90);g.d3Force('x',
 				out.WriteString(`<thead><tr><th>File</th><th>Changes</th><th>Top Authors</th></tr></thead>`)
 				out.WriteString(fmt.Sprintf(`<tbody>%s</tbody></table></div></div>`, churnRows.String()))
 			}
-			// Sub-card 3: Semantic Standards
+			// Sub-card 4: Semantic Standards
 			if tagStats.TotalTags > 0 || commitStats.Total > 0 {
 				out.WriteString(`<div class="sub-card"><h3 class="sub-card-title">📐 Semantic Standards</h3>`)
 				out.WriteString(semHTML.String())

@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
+	gitpkg "github.com/goscope/internal/git"
 	"github.com/goscope/internal/parser"
 )
 
@@ -172,4 +174,92 @@ func fmtNum(n int) string {
 		r = append(r, byte(ch))
 	}
 	return string(r)
+}
+
+func buildBranchManagementHTML(bs gitpkg.BranchStats) string {
+	if bs.TotalBranches == 0 {
+		return ""
+	}
+
+	fmtDays := func(d float64) string {
+		if d <= 0 {
+			return "—"
+		}
+		if d < 1 {
+			return fmt.Sprintf("%.0fh", d*24)
+		}
+		return fmt.Sprintf("%.1f days", d)
+	}
+	fmtHours := func(h float64) string {
+		if h <= 0 {
+			return "—"
+		}
+		if h < 1 {
+			return fmt.Sprintf("%.0fm", h*60)
+		}
+		if h < 24 {
+			return fmt.Sprintf("%.1fh", h)
+		}
+		return fmt.Sprintf("%.1f days", h/24)
+	}
+
+	depthStr := "—"
+	if bs.MaxDepth > 0 {
+		depthStr = fmt.Sprintf("%d", bs.MaxDepth)
+	}
+
+	rollbackStr := "—"
+	if bs.TotalMainCommits > 0 {
+		rate := float64(bs.RollbackCount) * 100 / float64(bs.TotalMainCommits)
+		rollbackStr = fmt.Sprintf("%.1f%%", rate)
+	}
+
+	var b strings.Builder
+	b.WriteString(`<div class="bm-grid">`)
+	b.WriteString(fmt.Sprintf(`<div class="bm-card"><div class="bm-value">%s</div><div class="bm-label">Avg Branch Lifetime</div></div>`, fmtDays(bs.AvgLifetimeDays)))
+	b.WriteString(fmt.Sprintf(`<div class="bm-card"><div class="bm-value">%s</div><div class="bm-label">Avg Time to Merge</div></div>`, fmtDays(bs.AvgTTMDays)))
+	b.WriteString(fmt.Sprintf(`<div class="bm-card"><div class="bm-value">%s</div><div class="bm-label">Integration Delay</div></div>`, fmtHours(bs.AvgIntegDelayHours)))
+	b.WriteString(fmt.Sprintf(`<div class="bm-card"><div class="bm-value">%s</div><div class="bm-label">Branch Depth</div></div>`, depthStr))
+	b.WriteString(fmt.Sprintf(`<div class="bm-card"><div class="bm-value">%s</div><div class="bm-label">Rollback Rate</div></div>`, rollbackStr))
+	peakDay := bs.PeakCommitDay
+	if peakDay == "" {
+		peakDay = "—"
+	}
+	b.WriteString(fmt.Sprintf(`<div class="bm-card"><div class="bm-value">%s</div><div class="bm-label">Peak Commit Day</div></div>`, esc(peakDay)))
+	b.WriteString(`</div>`)
+
+	if bs.RollbackCount > 0 {
+		b.WriteString(fmt.Sprintf(
+			`<p style="font-size:12px;color:var(--text3);margin:0 0 12px">%d revert/rollback commits out of %s on main.</p>`,
+			bs.RollbackCount, fmtNum(bs.TotalMainCommits),
+		))
+	}
+
+	if len(bs.StaleBranches) > 0 {
+		b.WriteString(fmt.Sprintf(
+			`<h4 style="margin:16px 0 8px;font-size:14px;color:var(--text2)">Stale Branches <span style="font-weight:400;color:var(--text3);font-size:12px">(no activity &gt;%d days)</span></h4>`,
+			bs.StaleThresholdDays,
+		))
+		b.WriteString(`<div class="table-wrap"><table class="file-table">`)
+		b.WriteString(`<thead><tr><th>Branch</th><th>Days Inactive</th><th>Last Activity</th></tr></thead><tbody>`)
+		for _, br := range bs.StaleBranches {
+			lastAct := "—"
+			if br.LastActivity > 0 {
+				lastAct = time.Unix(int64(br.LastActivity), 0).Format("2006-01-02")
+			}
+			nameStyle := ""
+			if br.DaysInactive > 90 {
+				nameStyle = ` style="color:var(--red)"`
+			} else if br.DaysInactive > 60 {
+				nameStyle = ` style="color:#e65100"`
+			}
+			b.WriteString(fmt.Sprintf(
+				`<tr><td class="mono"%s>%s</td><td class="mono">%d</td><td class="mono">%s</td></tr>`,
+				nameStyle, esc(br.Name), br.DaysInactive, lastAct,
+			))
+		}
+		b.WriteString(`</tbody></table></div>`)
+	}
+
+	return b.String()
 }
